@@ -11,6 +11,8 @@ data AsmLine
     | Section String
     | Extern (NonEmpty String)
     | EmptyLine
+    | TopLevelComment String
+    | Comment String
 
 data Instruction
     = Pop  Operand
@@ -26,7 +28,7 @@ data Instruction
     | Jmp  Operand
     | Je   Operand
     | Resb Natural
-    | Db (NonEmpty Operand)
+    | Db  (NonEmpty Operand)
     | Ret
 
 data Operand
@@ -109,4 +111,7 @@ asmLineToString (Global s) = "global" <+> s
 asmLineToString (Section s) = "section" <+> "." ++ s
 asmLineToString (Extern functions) = "extern" <+> commaSeparated functions
 asmLineToString EmptyLine = ""
+-- Top level comments don't need indentaion, while regular comments do
+asmLineToString (Comment str) = "    ;" <+> str
+asmLineToString (TopLevelComment str) = ";" <+> str
 
