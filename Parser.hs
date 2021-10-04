@@ -1,3 +1,5 @@
+{-# LANGUAGE BlockArguments #-}
+
 module Parser where
 
 import Text.Parsec
@@ -6,6 +8,8 @@ import Text.Parsec.String (Parser)
 
 import Compile (Expr(..))
 import Data.Char (isDigit)
+import Data.Maybe (isJust)
+import Control.Monad (guard)
 
 validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
@@ -13,11 +17,27 @@ validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
 varName :: Parser String
 varName = many1 $ satisfy validNameChar
 
+{- HLINT ignore "Use <$>" -}
 exprPrefix :: Parser Expr
 exprPrefix = do
     -- Integer literals
+    isNegative <- isJust <$> optionMaybe (char '-')
     x <- many1 (satisfy isDigit)
-    pure $ Int $ read x
+    pure $ Int $ (if isNegative then negate else id) $ read x
+ <|> do
+    -- If expressions
+    _ <- string "if"
+    spaces
+    condition <- expr
+    spaces
+    _ <- string "then"
+    spaces
+    trueBranch <- expr
+    spaces
+    _ <- string "else"
+    spaces
+    falseBranch <- expr
+    pure $ IfThenElse condition trueBranch falseBranch
  <|> do
     -- Lambdas
     _ <- char '\\'
@@ -29,11 +49,16 @@ exprPrefix = do
  <|> do
     -- Parenthesized expressions
     _ <- char '('
+    spaces
     exprInParens <- expr
+    spaces
     _ <- char ')'
     pure exprInParens
     -- Variables
- <|> Var <$> varName
+ <|> try do -- Try is necessary to avoid consuming keywords such as `then` and `else`
+    name <- varName
+    guard $ name `notElem` ["then", "else"]
+    pure $ Var name
 
 expr :: Parser Expr
 expr = foldl1 App <$> endBy1 exprPrefix spaces

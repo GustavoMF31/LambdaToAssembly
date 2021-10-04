@@ -1,0 +1,4 @@
+(\fib -> fib 5)
+((\y -> y (\recurse n -> if eq n 0 then 1 else (if eq n 1 then 1 else
+  add (recurse (add n (-1))) (recurse (add n (-2)))
+))) (\f -> (\x -> f (\n -> x x n)) (\x -> f (\n -> x x n))))

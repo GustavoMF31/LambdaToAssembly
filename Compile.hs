@@ -5,6 +5,7 @@ import Data.Bifunctor (second)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 
 import Asm
+import Control.Monad.State (State, MonadState (get, put), runState)
 
 elemIndexNat :: Eq a => a -> [a] -> Maybe Natural 
 elemIndexNat _ [] = Nothing
@@ -12,12 +13,10 @@ elemIndexNat a (x : xs) = if a == x
     then Just 0
     else fmap (+1) (elemIndexNat a xs)
 
-dropThird :: (a, b, c) -> (a, b)
-dropThird (a, b, _) = (a, b)
-
 data Expr
     = Lambda String Expr
     | App Expr Expr
+    | IfThenElse Expr Expr Expr
     | Var String
     | Int Int
     deriving Show
@@ -25,17 +24,29 @@ data Expr
 data DeBruijExpr
     = DBLambda DeBruijExpr
     | DBApp DeBruijExpr DeBruijExpr
+    | DBIfThenElse DeBruijExpr DeBruijExpr DeBruijExpr
     | DBVar Natural
     | DBInt Int
     | DBBuiltIn BuiltInFunction
     deriving Show
 
-data BuiltInFunction = BuiltInAdd
-    deriving Show
+data BuiltInFunction
+    = BuiltInAdd
+    | BuiltInEq
+    deriving (Show, Enum, Bounded)
+
+builtInName :: BuiltInFunction -> String
+builtInName BuiltInAdd = "add"
+builtInName BuiltInEq  = "eq"
+
+builtIns :: [BuiltInFunction]
+builtIns = [minBound .. maxBound]
+
+builtInNames :: [String]
+builtInNames = map builtInName builtIns
 
 asBuiltInFunction :: String -> Maybe BuiltInFunction
-asBuiltInFunction "add" = Just BuiltInAdd
-asBuiltInFunction _ = Nothing
+asBuiltInFunction = flip lookup $ zip builtInNames builtIns
 
 -- In case of Left, returns the name of the unbound variable that caused the problem
 toDeBruijn :: Expr -> Either String DeBruijExpr
@@ -44,6 +55,8 @@ toDeBruijn = go []
     go :: [String] -> Expr -> Either String DeBruijExpr
     go vars (Lambda varName body) = second DBLambda $ go (varName:vars) body
     go vars (App f x) = DBApp <$> go vars f <*> go vars x
+    go vars (IfThenElse bool thenBranch elseBranch) =
+        DBIfThenElse <$> go vars bool <*> go vars thenBranch <*> go vars elseBranch
     -- The call to `elemIndexNat` comes first because the global name might be shadowed
     go vars (Var varName) = case elemIndexNat varName vars of
         Nothing -> case asBuiltInFunction varName of
@@ -64,6 +77,36 @@ writeToHeap = writeToPtr heapRegister
 advanceHeapPtr :: Int -> Instruction
 advanceHeapPtr = Add heapRegister . NumOperand
 
+createLambda :: Asm -> State (Asm, Int, Int) ()
+createLambda newLambda = do
+    (lambdas, lambdaCount, localVarCount) <- get
+    put (newLambda ++ lambdas, lambdaCount + 1, localVarCount)
+
+increaseLambdaCount :: State (Asm, Int, Int) ()
+increaseLambdaCount = do
+    (lambdas, lambdaCount, localVarCount) <- get
+    put (lambdas, lambdaCount + 1, localVarCount)
+
+increaseLocalVarCount :: State (Asm, Int, Int) ()
+increaseLocalVarCount = do
+    (lambdas, lambdaCount, localVarCount) <- get
+    put (lambdas, lambdaCount, localVarCount + 1)
+
+getLambdaCount :: State (Asm, Int, Int) Int
+getLambdaCount = do
+    (_, lambdaCount, _) <- get
+    pure lambdaCount
+
+getLocalVarCount :: State (Asm, Int, Int) Int
+getLocalVarCount = do
+    (_, _, localVarCount) <- get
+    pure localVarCount
+
+getCompilationResults :: State (Asm, Int, Int) Asm -> (Asm, Asm)
+getCompilationResults state =
+    let (asm, (lambdas, _, _)) = runState state ([], 0, 0)
+    in (lambdas, asm)
+
 -- Use of each register:
 --   rax ; Holds the return value of a compiled expression
 --   rbx ; Miscelaneous use
@@ -72,26 +115,26 @@ advanceHeapPtr = Add heapRegister . NumOperand
 --   r10 ; Holds the argument to `copy_env`
 --   r9  ; Holds the current environment pointer
 compile :: DeBruijExpr -> Asm
-compile = uncurry assembleAsm . dropThird . go 0 0
+compile = uncurry assembleAsm . getCompilationResults . go
   where
-    go :: Int -> Int -> DeBruijExpr -> (Asm, Asm, Int)
-    go lambdaCount localVarCount (DBLambda body) =
-        (newLambda ++ lambdas, code, newLambdaCount + 1)
+    go :: DeBruijExpr -> State (Asm, Int, Int) Asm
+    go (DBLambda body) = do
+        increaseLocalVarCount
+        compiledBody <- go body
+
+        lambdaCount <- getLambdaCount
+        let lambdaName :: String
+            lambdaName = "lambda_" ++ show lambdaCount
+
+            newLambda :: Asm
+            newLambda = subroutine lambdaName compiledBody
+
+        createLambda newLambda
+        code lambdaName <$> getLocalVarCount
       where
-        (lambdas, compiledBody, newLambdaCount) = go lambdaCount (localVarCount + 1) body
-
-        lambdaName :: String
-        lambdaName = "lambda_" ++ show newLambdaCount
-
-        newLambda :: Asm
-        newLambda = 
-            [ Label lambdaName ]
-         ++ compiledBody
-         ++ [ Inst Ret ]
-
         -- Builds a closure on the heap and returns its address through rax
-        code :: Asm
-        code = [ Comment "Building Closure" ]
+        code :: String -> Int -> Asm
+        code lambdaName localVarCount = [ Comment "Building Closure" ]
             ++ map Inst
             [ Mov Rax heapRegister -- Get the address of the closure
             , writeToHeap (Symbol lambdaName) -- Write the code pointer to the closure
@@ -102,14 +145,10 @@ compile = uncurry assembleAsm . dropThird . go 0 0
             , Call (Symbol "copy_env")
             ] ++ [ EmptyLine ]
 
-    go lambdaCount localVarCount (DBApp f x) =
-        (lambdas ++ lambdas', code, lambdaCount'')
+    go (DBApp f x) = code <$> go x <*> go f
       where
-        (lambdas , compiledArg     , lambdaCount' ) = go lambdaCount  localVarCount x
-        (lambdas', compiledFunction, lambdaCount'') = go lambdaCount' localVarCount f
-
-        code :: Asm
-        code = [ Comment "Compiling function for call {" ]
+        code :: Asm -> Asm -> Asm
+        code compiledArg compiledFunction = [ Comment "Compiling function for call {" ]
          ++ compiledFunction
          ++ [ Comment "} Saving closure pointer {" ]
          ++ [ Inst $ Push Rax ] -- Save the closure pointer on the stack
@@ -130,20 +169,89 @@ compile = uncurry assembleAsm . dropThird . go 0 0
             , EmptyLine
             ]
 
-    go lambdaCount _ (DBVar index) = ([],
+    go (DBIfThenElse bool trueBranch falseBranch) = do
+        compiledBool        <- go bool
+        compiledTrueBranch  <- go trueBranch
+        compiledFalseBranch <- go falseBranch
+
+        -- The lambda count serves as a way to generate unique labels
+        -- for lambdas and `if-then-else`s
+        labelCount <- getLambdaCount
+        increaseLambdaCount
+
+        let thenLabel = "then_" ++ show labelCount
+            elseLabel = "else_" ++ show labelCount
+            doneLabel = "done_" ++ show labelCount
+
+        pure $
+            compiledBool
+         ++ [ Inst $ Cmp Rax $ NumOperand 0
+            , Inst $ Je $ Symbol elseLabel
+            ]
+         ++ [ Label thenLabel ]
+         ++ compiledTrueBranch
+         ++ [ Inst $ Jmp $ Symbol doneLabel]
+
+         ++ [ Label elseLabel ]
+         ++ compiledFalseBranch
+
+         ++ [ Label doneLabel ]
+
+    go (DBVar index) = pure
         -- Read the variable from the current environment
         -- (The environment pointer is in r9)
         [ Inst $ Mov Rax $ AddressSum R9 (NumOperand $ fromIntegral $ index * 8)
         , EmptyLine
-        ], lambdaCount)
+        ]
 
-    go lambdaCount _ (DBInt i) = ([], [ Inst $ Mov Rax (NumOperand i) ], lambdaCount)
+    go (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
 
-    -- For now, the `add` closure is stored at the very start of the heap
-    go lambdaCount _ (DBBuiltIn BuiltInAdd) = ([], [Inst $ Mov Rax $ Symbol "heap_base"], lambdaCount)
+    go (DBBuiltIn builtIn) = pure [ Inst $ Mov Rax $ Symbol $ builtInName builtIn ++ "_curried_0" ]
 
 subroutine :: String -> Asm -> Asm
 subroutine name instructions = Label name : (instructions ++ [Inst Ret])
+
+compileBuiltIn :: BuiltInFunction -> Asm
+compileBuiltIn BuiltInAdd =
+    [ Inst $ Mov Rax $ Dereference R9
+    , Inst $ Mov Rbx $ AddressSum R9 $ NumOperand 8
+    , Inst $ Add Rax Rbx
+    ]
+compileBuiltIn BuiltInEq =
+    [ Inst $ Mov Rax $ Dereference R9
+    , Inst $ Mov Rbx $ AddressSum R9 $ NumOperand 8
+    , Inst $ Cmp Rax Rbx
+    -- Zero and one represent false and true, respectively (at least for now)
+    , Inst $ Mov Rbx $ NumOperand 1
+    , Inst $ CmoveE  Rax Rbx
+    , Inst $ Mov Rbx $ NumOperand 0
+    , Inst $ CmoveNE Rax Rbx
+    ]
+
+builtInArity :: BuiltInFunction -> Natural
+builtInArity BuiltInAdd = 2
+builtInArity BuiltInEq = 2
+
+createCurryingSubroutine :: BuiltInFunction -> Natural -> Asm
+createCurryingSubroutine builtIn n =
+    subroutine (curried ++ "_" ++ show n)
+    [ Inst $ Mov Rax heapRegister                     -- Save the address to return
+    , Inst $ writeToHeap $ Symbol $ curried ++ "_" ++ show (n + 1)       -- Write the code pointer
+    , Inst $ advanceHeapPtr 16
+    , Inst $ Mov R10 $ NumOperand $ fromIntegral n -- TODO: Perhaps n-1?
+    , Inst $ Call $ Symbol "copy_env"                         -- Make room for both arguments
+    ]
+  where
+    name = builtInName builtIn
+    curried = name ++ "_curried"
+
+compileCurriedBuiltIn :: BuiltInFunction -> Asm
+compileCurriedBuiltIn builtIn =
+    concatMap (createCurryingSubroutine builtIn) [1 .. arity - 1]
+ ++ subroutine (name ++ "_curried_" ++ show arity) (compileBuiltIn builtIn)
+  where
+    name = builtInName builtIn
+    arity = builtInArity builtIn
 
 assembleAsm :: Asm -> Asm -> Asm
 assembleAsm lambdas start =
@@ -174,20 +282,10 @@ assembleAsm lambdas start =
        , Inst $ Jmp $ LocalSymbol "loop"
        , LocalLabel "done"
        ]
-       ++ [ EmptyLine ]
-       -- Builds a closure for its fully applied form and returns its address
-    ++ subroutine "add_curried"
-       [ Inst $ Mov Rax heapRegister
-       , Inst $ writeToHeap $ Symbol "add_fully_applied"
-       , Inst $ advanceHeapPtr 24
-       , Inst $ Mov Rbx $ Dereference R9
-       , Inst $ Mov (AddressSum Rax $ NumOperand 16) Rbx
-       ]
-    ++ subroutine "add_fully_applied"
-       [ Inst $ Mov Rax $ Dereference R9
-       , Inst $ Mov Rbx $ AddressSum R9 $ NumOperand 8
-       , Inst $ Add Rax Rbx -- Perform the actual addition
-       ]
+    ++ [ EmptyLine ]
+
+    -- Define the built in functions
+    ++ concatMap compileCurriedBuiltIn builtIns
 
     ++ [ Comment "lambdas" | not (null lambdas) ]
     ++ lambdas
@@ -196,13 +294,12 @@ assembleAsm lambdas start =
     ++ [ Label "main" ]
     ++ [ Comment "Initialize the heap pointer register"
        , Inst $ Mov heapRegister $ Symbol "heap_base"
-       , Comment "Create the closure for the add function"
-        -- Since its always the same, there is no need to create it every time `add` gets called,
-        -- so let's create it once and point to it when necessary
-       , Inst $ writeToHeap $ Symbol "add_curried"
-       , Inst $ advanceHeapPtr 16
-       , EmptyLine
        ]
+    ++ [ Comment "Create the closures for the built in functions" ]
+        -- Since they are always the same, there is no need to create them every time the functions get called,
+        -- so let's create them once and point to them when necessary
+    ++ concat [ [ Inst $ Mov (Dereference $ Symbol $ name ++ "_curried_0") $ Symbol $ name ++ "_curried_1"] | name <- builtInNames ]
+    ++ [ EmptyLine ]
     ++ start
     ++ [ Comment "Print the top of the stack" ]
     ++ map Inst
@@ -217,9 +314,15 @@ assembleAsm lambdas start =
     ++ [ Section "data"
        , Label "digit_formatter"
        , Inst $ Db $ StringOperand "%llu" :| [NumOperand 10]
-       -- Allocate memory for the heap in the .bss segment
+
        , Section "bss"
-       , Label "heap_base"
+       , TopLevelComment "Closures for built in functions"
+       ]
+
+    ++ concat [ [Label (name ++ "_curried_0"), Inst $ Resb 16] | name <- builtInNames ]
+
+       -- Allocate memory for the heap in the .bss segment
+    ++ [ Label "heap_base"
        , Inst $ Resb $ 100 * 8 -- TODO: More memory (And garbage collection)
        ]
 

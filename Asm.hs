@@ -18,12 +18,15 @@ data Instruction
     = Pop  Operand
     | Push Operand
     | Inc  Operand
+    | Dec  Operand
     | Mov  Operand Operand
     | Add  Operand Operand
     | Sub  Operand Operand
     | Cmp  Operand Operand
     | Xor  Operand Operand
     | Lea  Operand Operand
+    | CmoveE  Operand Operand
+    | CmoveNE Operand Operand
     | Call Operand
     | Jmp  Operand
     | Je   Operand
@@ -37,6 +40,7 @@ data Operand
     | Rax | Rbx | Rcx | Rdx | Rsp | Rdi | Rsi | R9 | R10
     | AddressSum Operand Operand
     | AddressSumMult Operand Operand Operand
+    | AddressSumSumMult Operand Operand Operand Operand
     | Dereference Operand
     | StringOperand String
     | NumOperand Int
@@ -59,6 +63,7 @@ instructionToString :: Instruction -> String
 instructionToString (Pop r) = "pop" <+> operandToString r
 instructionToString (Push r) = "push" <+> operandToString r
 instructionToString (Inc r) = "inc" <+> operandToString r
+instructionToString (Dec r) = "dec" <+> operandToString r
 instructionToString (Mov a b) =
     "mov" <+> operandToString a <&> operandToString b
 instructionToString (Add a b) =
@@ -67,6 +72,10 @@ instructionToString (Sub a b) =
     "sub" <+> operandToString a <&> operandToString b
 instructionToString (Lea a b) =
     "lea" <+> operandToString a <&> operandToString b
+instructionToString (CmoveE a b) =
+    "cmove" <+> operandToString a <&> operandToString b
+instructionToString (CmoveNE a b) =
+    "cmovne" <+> operandToString a <&> operandToString b
 instructionToString (Cmp a b) =
     "cmp" <+> operandToString a <&> operandToString b
 instructionToString Ret = "ret"
@@ -87,6 +96,9 @@ operandToString (AddressSum a b) =
     "[" ++ operandToString a <+> "+" <+> operandToString b ++ "]"
 operandToString (AddressSumMult a b c) =
     "[" ++ operandToString a <+> "+" <+> operandToString b <+> "*" <+> operandToString c ++ "]"
+operandToString (AddressSumSumMult a b c d) =
+    "[" ++ operandToString a <+> "+" <+> operandToString b <+> "+" <+> operandToString c <+> "*"
+    <+> operandToString d ++ "]"
 operandToString (Dereference x) =
     "qword [" ++ operandToString x ++ "]"
 operandToString Rax = "rax"
