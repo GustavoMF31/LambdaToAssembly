@@ -26,7 +26,7 @@ exprPrefix = do
     pure $ Int $ (if isNegative then negate else id) $ read x
  <|> do
     -- If expressions
-    _ <- string "if"
+    _ <- try $ string "if"
     spaces
     condition <- expr
     spaces
@@ -54,10 +54,24 @@ exprPrefix = do
     spaces
     _ <- char ')'
     pure exprInParens
-    -- Variables
- <|> try do -- Try is necessary to avoid consuming keywords such as `then` and `else`
+ <|> do
+    -- Let expressions
+    _ <- try $ string "let"
+    spaces
     name <- varName
-    guard $ name `notElem` ["then", "else"]
+    spaces
+    _ <- char '='
+    spaces
+    definition <- expr
+    spaces
+    _ <- string "in"
+    spaces
+    body <- expr
+    pure $ Let name definition body
+ <|> try do -- Try is necessary to avoid consuming keywords such as `then` and `else`
+    -- Variables
+    name <- varName
+    guard $ name `notElem` ["if", "then", "else", "let", "in"]
     pure $ Var name
 
 expr :: Parser Expr

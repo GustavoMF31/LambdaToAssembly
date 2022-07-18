@@ -17,6 +17,11 @@ kite = App cardinal kestrel
 idTerm = Lambda "x" (Var "x")
 -}
 
+-- TODO: Function application syntax with "let"
+-- TODO: Boolean OR
+-- TODO: Comments
+-- TODO: ADTs
+-- TODO: Types?
 -- TODO: Garbage collection
 main :: IO ()
 main = do

@@ -17,6 +17,7 @@ data Expr
     = Lambda String Expr
     | App Expr Expr
     | IfThenElse Expr Expr Expr
+    | Let String Expr Expr -- Let is allowed to be recursive
     | Var String
     | Int Int
     deriving Show
@@ -24,6 +25,7 @@ data Expr
 data DeBruijExpr
     = DBLambda DeBruijExpr
     | DBApp DeBruijExpr DeBruijExpr
+    | DBLet DeBruijExpr DeBruijExpr
     | DBIfThenElse DeBruijExpr DeBruijExpr DeBruijExpr
     | DBVar Natural
     | DBInt Int
@@ -58,6 +60,10 @@ toDeBruijn = go []
     go vars (IfThenElse bool thenBranch elseBranch) =
         DBIfThenElse <$> go vars bool <*> go vars thenBranch <*> go vars elseBranch
     -- The call to `elemIndexNat` comes first because the global name might be shadowed
+    go vars (Let varName definition body) =
+        -- Since "let" can be recursive, both the definition and the body
+        -- have access to variable it binds
+        DBLet <$> go (varName : vars) definition <*> go (varName : vars) body
     go vars (Var varName) = case elemIndexNat varName vars of
         Nothing -> case asBuiltInFunction varName of
             Just builtIn -> Right $ DBBuiltIn builtIn
@@ -77,34 +83,24 @@ writeToHeap = writeToPtr heapRegister
 advanceHeapPtr :: Int -> Instruction
 advanceHeapPtr = Add heapRegister . NumOperand
 
-createLambda :: Asm -> State (Asm, Int, Int) ()
+createLambda :: Asm -> State (Asm, Int) ()
 createLambda newLambda = do
-    (lambdas, lambdaCount, localVarCount) <- get
-    put (newLambda ++ lambdas, lambdaCount + 1, localVarCount)
+    (lambdas, lambdaCount) <- get
+    put (newLambda ++ lambdas, lambdaCount + 1)
 
-increaseLambdaCount :: State (Asm, Int, Int) ()
+increaseLambdaCount :: State (Asm, Int) ()
 increaseLambdaCount = do
-    (lambdas, lambdaCount, localVarCount) <- get
-    put (lambdas, lambdaCount + 1, localVarCount)
+    (lambdas, lambdaCount) <- get
+    put (lambdas, lambdaCount + 1)
 
-increaseLocalVarCount :: State (Asm, Int, Int) ()
-increaseLocalVarCount = do
-    (lambdas, lambdaCount, localVarCount) <- get
-    put (lambdas, lambdaCount, localVarCount + 1)
-
-getLambdaCount :: State (Asm, Int, Int) Int
+getLambdaCount :: State (Asm, Int) Int
 getLambdaCount = do
-    (_, lambdaCount, _) <- get
+    (_, lambdaCount) <- get
     pure lambdaCount
 
-getLocalVarCount :: State (Asm, Int, Int) Int
-getLocalVarCount = do
-    (_, _, localVarCount) <- get
-    pure localVarCount
-
-getCompilationResults :: State (Asm, Int, Int) Asm -> (Asm, Asm)
+getCompilationResults :: State (Asm, Int) Asm -> (Asm, Asm)
 getCompilationResults state =
-    let (asm, (lambdas, _, _)) = runState state ([], 0, 0)
+    let (asm, (lambdas, _)) = runState state ([], 0)
     in (lambdas, asm)
 
 -- Use of each register:
@@ -115,12 +111,12 @@ getCompilationResults state =
 --   r10 ; Holds the argument to `copy_env`
 --   r9  ; Holds the current environment pointer
 compile :: DeBruijExpr -> Asm
-compile = uncurry assembleAsm . getCompilationResults . go
+compile = uncurry assembleAsm . getCompilationResults . go 0
   where
-    go :: DeBruijExpr -> State (Asm, Int, Int) Asm
-    go (DBLambda body) = do
-        increaseLocalVarCount
-        compiledBody <- go body
+    -- v represents the number of local variables currently in scope
+    go :: Natural -> DeBruijExpr -> State (Asm, Int) Asm
+    go v (DBLambda body) = do
+        compiledBody <- go (v + 1) body
 
         lambdaCount <- getLambdaCount
         let lambdaName :: String
@@ -130,10 +126,10 @@ compile = uncurry assembleAsm . getCompilationResults . go
             newLambda = subroutine lambdaName compiledBody
 
         createLambda newLambda
-        code lambdaName <$> getLocalVarCount
+        pure $ code lambdaName v
       where
         -- Builds a closure on the heap and returns its address through rax
-        code :: String -> Int -> Asm
+        code :: String -> Natural -> Asm
         code lambdaName localVarCount = [ Comment "Building Closure" ]
             ++ map Inst
             [ Mov Rax heapRegister -- Get the address of the closure
@@ -141,11 +137,11 @@ compile = uncurry assembleAsm . getCompilationResults . go
             , advanceHeapPtr 16 -- Leave room for the argument to the lambda (it is filled in before a call)
 
             -- Capture the current environment and its variables
-            , Mov R10 (NumOperand localVarCount)
+            , Mov R10 $ NumOperand $ fromIntegral localVarCount
             , Call (Symbol "copy_env")
             ] ++ [ EmptyLine ]
 
-    go (DBApp f x) = code <$> go x <*> go f
+    go v (DBApp f x) = code <$> go v x <*> go v f
       where
         code :: Asm -> Asm -> Asm
         code compiledArg compiledFunction = [ Comment "Compiling function for call {" ]
@@ -156,23 +152,35 @@ compile = uncurry assembleAsm . getCompilationResults . go
          ++ compiledArg -- Put the argument on rax
          ++ [ Comment "} Performing the call {" ]
          ++ [ Inst $ Pop Rdx -- Get the function pointer from the stack
+            -- Preserve what was previously the lambda's argument:
+            -- (Necessary for recursive calls to work)
+            , Inst $ Mov Rbx (AddressSum Rdx $ NumOperand 8)
+            , Inst $ Push Rbx
+
             , Inst $ Mov (AddressSum Rdx $ NumOperand 8) Rax -- Write the argument to the closure's environment
             -- Save the current environment pointer and
             -- send to the lambda its environment pointer through r9
             , Inst $ Push R9
             , Inst $ Lea R9 (AddressSum Rdx $ NumOperand 8)
+            -- Save the function pointer
+            , Inst $ Push Rdx
             -- Make the actual call
             , Inst $ Call (Dereference Rdx)
+            -- Restore the function pointer
+            , Inst $ Pop Rdx
             -- Restore the environment pointer
             , Inst $ Pop R9
+            -- Restore the previous lambda argument
+            , Inst $ Pop Rbx
+            , Inst $ Mov (AddressSum Rdx $ NumOperand 8) Rbx
             , Comment "}"
             , EmptyLine
             ]
 
-    go (DBIfThenElse bool trueBranch falseBranch) = do
-        compiledBool        <- go bool
-        compiledTrueBranch  <- go trueBranch
-        compiledFalseBranch <- go falseBranch
+    go v (DBIfThenElse bool trueBranch falseBranch) = do
+        compiledBool        <- go v bool
+        compiledTrueBranch  <- go v trueBranch
+        compiledFalseBranch <- go v falseBranch
 
         -- The lambda count serves as a way to generate unique labels
         -- for lambdas and `if-then-else`s
@@ -196,17 +204,41 @@ compile = uncurry assembleAsm . getCompilationResults . go
          ++ compiledFalseBranch
 
          ++ [ Label doneLabel ]
+    go v (DBLet definition body) = do
+        -- Both the definition and the body have access to one more variable
+        -- (namely, the let-bound one)
+        compiledDefinition <- go (v + 1) definition
+        compiledBody       <- go (v + 1) body
+        pure $
+            -- Create an environment with the let bound variable
+            [ Comment "LET"
+            , Inst $ Push R9 -- Save our environment pointer
+            , Inst $ Mov Rbx heapRegister -- Save the address of the future environment pointer
+            , Inst $ Push Rbx
+            , Inst $ advanceHeapPtr 8 -- Leave room for the variable
+            , Inst $ Mov R10 $ NumOperand $ fromIntegral v -- Copy the current environment
+            , Inst $ Call $ Symbol "copy_env"
+            , Inst $ Pop R9 -- Pass the environment pointer through R9
+            , Inst $ Mov (Dereference R9) heapRegister -- Give the definition a way to refer to itself
+            ]
+         ++ compiledDefinition -- Evaluate the definition
+         -- Write the result of evaluating the definition to the environment
+         ++ [ Inst $ Mov (Dereference R9) Rax ]
+         -- Evaluate the body (still in the environment)
+         ++ compiledBody
+         -- Restore R9
+         ++ [ Inst $ Pop R9 ]
 
-    go (DBVar index) = pure
+    go _ (DBVar index) = pure
         -- Read the variable from the current environment
         -- (The environment pointer is in r9)
         [ Inst $ Mov Rax $ AddressSum R9 (NumOperand $ fromIntegral $ index * 8)
         , EmptyLine
         ]
 
-    go (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
+    go _ (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
 
-    go (DBBuiltIn builtIn) = pure [ Inst $ Mov Rax $ Symbol $ builtInName builtIn ++ "_curried_0" ]
+    go _ (DBBuiltIn builtIn) = pure [ Inst $ Mov Rax $ Symbol $ builtInName builtIn ++ "_curried_0" ]
 
 subroutine :: String -> Asm -> Asm
 subroutine name instructions = Label name : (instructions ++ [Inst Ret])

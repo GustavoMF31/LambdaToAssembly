@@ -1,0 +1,5 @@
+let sum = (\x -> if eq x 1
+  then 1
+  else add x (sum (add x (-2)))
+)
+in sum 31
