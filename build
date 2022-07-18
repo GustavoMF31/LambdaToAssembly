@@ -1,4 +1,4 @@
 #!/bin/bash
 
-ghc -Wall Main.hs && ./Main examples/expr.ln && nasm -felf64 out.asm && gcc -no-pie out.o && ./a.out "$@"
+ghc -Wall Main.hs && ./Main examples/$1.ln && nasm -felf64 out.asm && gcc -no-pie out.o && ./a.out "$@"
 
