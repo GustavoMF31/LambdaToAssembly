@@ -17,14 +17,16 @@ kite = App cardinal kestrel
 idTerm = Lambda "x" (Var "x")
 -}
 
+-- TODO: Strings
+-- TODO: Printing (Or IO in general)
+-- TODO: mul builtIn
 -- TODO: Function application syntax with "let"
 -- TODO: Boolean OR
--- TODO: boolToInt function
 -- TODO: make the examples typecheck
 -- TODO: Infix binary operators
 -- TODO: Comments
 -- TODO: ADTs
--- TODO: Types?
+-- TODO: Polymorphic Types
 -- TODO: Garbage collection
 main :: IO ()
 main = do

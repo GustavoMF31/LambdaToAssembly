@@ -1,0 +1,11 @@
+not : Bool -> Bool
+not = \x -> if x
+  then False
+  else True
+
+boolToInt : Bool -> Int
+boolToInt = \x -> if x
+  then 1
+  else 0
+
+boolToInt (not True)

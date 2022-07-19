@@ -15,7 +15,7 @@ validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
 
 keywords :: [String]
-keywords = ["if", "then", "else", "let", "in", "Int", "Bool"]
+keywords = ["if", "then", "else", "let", "in", "Int", "Bool", "True", "False"]
 
 varName :: Parser String
 varName = do
@@ -29,7 +29,9 @@ spaces :: Parser ()
 spaces = skipMany $
     void (char ' ') <|> try (char '\n' *> notFollowedBy (char '\n'))
 
--- TODO: True and False
+-- TODO: Better parse error messages
+-- (Seems like everything is turning into "unexpected ':'"
+
 {- HLINT ignore "Use <$>" -}
 exprPrefix :: Parser Expr
 exprPrefix = do
@@ -37,6 +39,8 @@ exprPrefix = do
     isNegative <- isJust <$> optionMaybe (char '-')
     x <- many1 (satisfy isDigit)
     pure $ Int $ (if isNegative then negate else id) $ read x
+ <|> TrueExpr <$ string "True"
+ <|> FalseExpr <$ string "False"
  <|> do
     -- If expressions
     _ <- try $ string "if"
@@ -75,17 +79,17 @@ exprPrefix = do
     -- Let expressions
     _ <- try $ string "let"
     spaces
-    (name, def) <- definition
+    (ty, (name, def)) <- definitionWithType
     spaces
     _ <- string "in"
     spaces
     body <- expr
-    -- TODO: Parse type annotations
-    pure $ Let Nothing name def body
+    pure $ Let ty name def body
  <|> try do -- Try is necessary to avoid consuming keywords such as `then` and `else`
     -- Variables
     name <- varName
     pure $ Var name
+ <?> "expression"
 
 expr :: Parser Expr
 expr = foldl1 App <$> endBy1 exprPrefix spaces
@@ -98,12 +102,13 @@ parseTypePrefix = do
     parens parseType
     <|> (BoolType <$ string "Bool")
     <|> (IntType  <$ string "Int")
+    <?> "type"
 
 parseType :: Parser Type
 parseType = chainr1 parseTypePrefix (ArrowType <$ try (spaces >> string "->" >> spaces))
 
-topLevelDefinition :: Parser (Maybe Type, (String, Expr))
-topLevelDefinition = do
+definitionWithType :: Parser (Maybe Type, (String, Expr))
+definitionWithType = do
     name <- varName
     spaces
 
@@ -136,11 +141,12 @@ definition = do
 
 file :: Parser Expr
 file = do
-    definitions <- try topLevelDefinition `sepEndBy` string "\n\n"
+    definitions <- try definitionWithType `sepEndBy` string "\n\n"
     spaces
     main <- expr
     spaces
-    pure $ foldl (\body (ann, (name, def)) -> Let ann name def body) main definitions
+    -- pure $ foldl (\body (ann, (name, def)) -> Let ann name def body) main definitions
+    pure $ foldr (\(ty, (name, def)) ->  Let ty name def) main definitions
 
 -- Unsafe! Uses readFile.
 parseFromFile :: String -> IO (Either ParseError Expr)

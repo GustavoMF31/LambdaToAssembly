@@ -1,0 +1,17 @@
+flip : (Int -> Int -> Int) -> Int -> Int -> Int
+flip = \f a b -> f b a
+
+mul : Int -> Int -> Int
+mul = \x y -> if eq x 0
+  then 0
+  else add y (mul (add x -1) y)
+
+fact : Int -> Int
+fact =
+  let go : Int -> Int -> Int
+      go = \x acc -> if eq x 0
+        then acc
+        else go (add x -1) (mul x acc)
+  in flip go 1
+
+fact 6
