@@ -1,1 +1,1 @@
-(\f -> add (f 10) (f 10)) (eq 10)
+(\f -> eq (f 10) (f 11) : (Int -> Int) -> Bool) (add 10)

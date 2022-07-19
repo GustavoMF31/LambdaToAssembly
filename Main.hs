@@ -2,7 +2,7 @@ import System.Exit (exitFailure)
 import System.Environment (getArgs)
 
 import Parser (parseFromFile)
-import Compile (toDeBruijn, compile, asmToString)
+import Compile (toDeBruijn, compile, asmToString, checkMain)
 
 {-
 term, idTerm, cardinal, kestrel, kite :: Expr
@@ -19,6 +19,9 @@ idTerm = Lambda "x" (Var "x")
 
 -- TODO: Function application syntax with "let"
 -- TODO: Boolean OR
+-- TODO: boolToInt function
+-- TODO: make the examples typecheck
+-- TODO: Infix binary operators
 -- TODO: Comments
 -- TODO: ADTs
 -- TODO: Types?
@@ -41,6 +44,10 @@ main = do
       Left var -> exitWithMessage $ "Out of scope variable: " ++ var
       Right dbExpr -> pure dbExpr
 
+    case checkMain dbExpr of
+        Left err -> putStrLn $ "Type Error: " ++ err
+        Right () -> pure ()
+        
     writeFile "out.asm" $ asmToString $ compile dbExpr
 
   where

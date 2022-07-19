@@ -1,4 +1,4 @@
-module Compile (Expr(..), toDeBruijn, compile, asmToString) where
+module Compile (Expr(..), Type(..), toDeBruijn, compile, asmToString, checkMain) where
 
 import Numeric.Natural (Natural)
 import Data.Bifunctor (second)
@@ -7,17 +7,33 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Asm
 import Control.Monad.State (State, MonadState (get, put), runState)
 
-elemIndexNat :: Eq a => a -> [a] -> Maybe Natural 
+elemIndexNat :: Eq a => a -> [a] -> Maybe Natural
 elemIndexNat _ [] = Nothing
 elemIndexNat a (x : xs) = if a == x
     then Just 0
     else fmap (+1) (elemIndexNat a xs)
 
+atIndex :: Natural -> [a] -> Maybe a
+atIndex _ [] = Nothing
+atIndex 0 (x : _) = Just x
+atIndex n (_ : xs) = atIndex (n - 1) xs
+
+data Type
+    = ArrowType Type Type
+    | BoolType
+    | IntType
+    deriving (Eq, Show)
+
 data Expr
     = Lambda String Expr
     | App Expr Expr
     | IfThenElse Expr Expr Expr
-    | Let String Expr Expr -- Let is allowed to be recursive
+    | TrueExpr
+    | FalseExpr
+    | Ann Expr Type
+    -- Let optionally holds a type annotation
+    -- (Though without one, it can't be recursive and still typecheck) 
+    | Let (Maybe Type) String Expr Expr -- Let is allowed to be recursive
     | Var String
     | Int Int
     deriving Show
@@ -25,8 +41,11 @@ data Expr
 data DeBruijExpr
     = DBLambda DeBruijExpr
     | DBApp DeBruijExpr DeBruijExpr
-    | DBLet DeBruijExpr DeBruijExpr
+    | DBLet (Maybe Type) DeBruijExpr DeBruijExpr
     | DBIfThenElse DeBruijExpr DeBruijExpr DeBruijExpr
+    | DBTrue
+    | DBFalse
+    | DBAnn DeBruijExpr Type
     | DBVar Natural
     | DBInt Int
     | DBBuiltIn BuiltInFunction
@@ -60,16 +79,19 @@ toDeBruijn = go []
     go vars (IfThenElse bool thenBranch elseBranch) =
         DBIfThenElse <$> go vars bool <*> go vars thenBranch <*> go vars elseBranch
     -- The call to `elemIndexNat` comes first because the global name might be shadowed
-    go vars (Let varName definition body) =
+    go vars (Let ty varName definition body) =
         -- Since "let" can be recursive, both the definition and the body
         -- have access to variable it binds
-        DBLet <$> go (varName : vars) definition <*> go (varName : vars) body
+        DBLet ty <$> go (varName : vars) definition <*> go (varName : vars) body
     go vars (Var varName) = case elemIndexNat varName vars of
         Nothing -> case asBuiltInFunction varName of
             Just builtIn -> Right $ DBBuiltIn builtIn
             Nothing -> Left varName -- Unbound variable
         Just i -> Right $ DBVar i
     go _ (Int i) = Right $ DBInt i
+    go _ TrueExpr = Right DBTrue
+    go _ FalseExpr = Right DBFalse
+    go vars (Ann expr ty) = DBAnn <$> go vars expr <*> pure ty
 
 heapRegister :: Operand
 heapRegister = Rcx
@@ -204,7 +226,7 @@ compile = uncurry assembleAsm . getCompilationResults . go 0
          ++ compiledFalseBranch
 
          ++ [ Label doneLabel ]
-    go v (DBLet definition body) = do
+    go v (DBLet _ definition body) = do
         -- Both the definition and the body have access to one more variable
         -- (namely, the let-bound one)
         compiledDefinition <- go (v + 1) definition
@@ -239,6 +261,73 @@ compile = uncurry assembleAsm . getCompilationResults . go 0
     go _ (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
 
     go _ (DBBuiltIn builtIn) = pure [ Inst $ Mov Rax $ Symbol $ builtInName builtIn ++ "_curried_0" ]
+    go _ DBTrue = pure [ Inst $ Mov Rax $ NumOperand 1 ]
+    go _ DBFalse = pure [ Inst $ Mov Rax $ NumOperand 0 ]
+    go v (DBAnn expr _) = go v expr
+
+type Ctxt = [Maybe Type]
+
+extend :: Ctxt -> Type -> Ctxt
+extend = flip $ (:) . Just
+
+extendWithUnknownType :: Ctxt -> Ctxt
+extendWithUnknownType = (Nothing :)
+
+infer :: Ctxt -> DeBruijExpr -> Either String Type
+infer gamma (DBApp f x) = do
+    functionTy <- infer gamma f
+    (lhs, rhs) <- case functionTy of
+        (ArrowType lhs rhs) -> pure (lhs, rhs)
+        _ -> Left $ "Expected function type for " ++ show f
+    check gamma x lhs
+    pure rhs
+infer gamma (DBIfThenElse condition ifTrue ifFalse) = do
+    check gamma condition BoolType
+    returnTy <- infer gamma ifTrue
+    check gamma ifFalse returnTy
+    pure returnTy
+infer gamma (DBAnn expr ty) = do
+    check gamma expr ty
+    pure ty
+infer gamma (DBVar index) = case atIndex index gamma of
+    (Just (Just ty)) -> pure ty
+    (Just Nothing) -> Left "Recursive code without a type annotation"
+    Nothing -> Left "Type checking error: Out of context DeBruijnIndex" 
+infer _ DBTrue = pure BoolType
+infer _ DBFalse = pure BoolType
+infer _ (DBInt _) = pure IntType
+infer _ (DBBuiltIn builtIn) = pure $ builtInType builtIn
+infer _ expr = Left $ "Failed to infer type for " ++ show expr
+
+builtInType :: BuiltInFunction -> Type
+builtInType BuiltInAdd = IntType `ArrowType` (IntType `ArrowType` IntType)
+builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
+
+check :: Ctxt -> DeBruijExpr -> Type -> Either String ()
+check gamma (DBLambda body) ty
+    | (ArrowType lhs rhs) <- ty = check (extend gamma lhs) body rhs
+    | otherwise = Left $ "Lambda can't have type " ++ show ty
+check gamma (DBLet Nothing def body) ty = do -- If the let doesn't have an annotation
+    -- Infer a type for the definition hoping it won't make a recursive call
+    -- (If it does we are screwed and typechecking fails)
+    defTy <- infer (extendWithUnknownType gamma) def 
+    -- Then check the result (the part after "in")
+    check (extend gamma defTy) body ty
+check gamma (DBLet (Just ann) def body) ty = do -- If we do have an annotation thing are easier:
+    check (extend gamma ann) def ann -- Check the definition agains the annotated type
+    check (extend gamma ann) body ty -- Check the body agains the type for the let
+
+check gamma expr ty = do
+    inferredTy <- infer gamma expr
+    if inferredTy == ty
+      then Right ()
+      else Left $ "Inferred type "
+            ++ show inferredTy
+            ++ " does not match checking type "
+            ++ show ty
+
+checkMain :: DeBruijExpr -> Either String ()
+checkMain = flip (check []) IntType
 
 subroutine :: String -> Asm -> Asm
 subroutine name instructions = Label name : (instructions ++ [Inst Ret])

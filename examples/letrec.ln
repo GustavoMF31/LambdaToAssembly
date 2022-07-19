@@ -1,9 +1,22 @@
-let fib = (\x -> if eq x 0
+true = eq 0 0
+
+false = eq 0 1
+
+x : Int
+x = 5
+
+g : Int -> Bool
+g = \x -> if eq x 5
+  then eq 0 0
+  else eq 1 1
+
+fib : Int -> Int
+fib = \x -> if eq x 0
   then 0
   else if eq x 1
     then 1
     else add
       (fib (add x (-1)))
       (fib (add x (-2)))
-  )
-in fib 5
+
+fib x
