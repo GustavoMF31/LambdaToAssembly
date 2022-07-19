@@ -24,6 +24,11 @@ data Type
     | IntType
     deriving (Eq, Show)
 
+prettyType :: Type -> String
+prettyType BoolType = "Bool"
+prettyType IntType = "Int"
+prettyType (ArrowType a b) = prettyType a ++ " -> " ++ prettyType b
+
 data Expr
     = Lambda String Expr
     | App Expr Expr
@@ -306,7 +311,7 @@ builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
 check :: Ctxt -> DeBruijExpr -> Type -> Either String ()
 check gamma (DBLambda body) ty
     | (ArrowType lhs rhs) <- ty = check (extend gamma lhs) body rhs
-    | otherwise = Left $ "Lambda can't have type " ++ show ty
+    | otherwise = Left $ "Lambda can't have type " ++ prettyType ty
 check gamma (DBLet Nothing def body) ty = do -- If the let doesn't have an annotation
     -- Infer a type for the definition hoping it won't make a recursive call
     -- (If it does we are screwed and typechecking fails)
@@ -322,9 +327,9 @@ check gamma expr ty = do
     if inferredTy == ty
       then Right ()
       else Left $ "Inferred type "
-            ++ show inferredTy
+            ++ prettyType inferredTy
             ++ " does not match checking type "
-            ++ show ty
+            ++ prettyType ty
 
 checkMain :: DeBruijExpr -> Either String ()
 checkMain = flip (check []) IntType
