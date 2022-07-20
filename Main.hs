@@ -20,7 +20,6 @@ idTerm = Lambda "x" (Var "x")
 -- TODO: Strings
 -- TODO: Printing (Or IO in general)
 -- TODO: mul builtIn
--- TODO: Function application syntax with "let"
 -- TODO: Boolean OR
 -- TODO: make the examples typecheck
 -- TODO: Infix binary operators

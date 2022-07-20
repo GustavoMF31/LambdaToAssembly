@@ -107,6 +107,7 @@ parseTypePrefix = do
 parseType :: Parser Type
 parseType = chainr1 parseTypePrefix (ArrowType <$ try (spaces >> string "->" >> spaces))
 
+-- TODO: Remove the code duplication between definitionWithType and definition
 definitionWithType :: Parser (Maybe Type, (String, Expr))
 definitionWithType = do
     name <- varName
@@ -121,23 +122,28 @@ definitionWithType = do
       spaces
       pure ty
 
+    -- Parse variables on the LHS of the definition
+    -- to support things like "f x = x" in place of "f = \x -> x"
+    varNames <- varName `sepEndBy` spaces
+
     _ <- char '='
     spaces
 
     body <- expr
-    pure (ty, (name, body))
+    pure (ty, (name, foldr Lambda body varNames))
 
 definition :: Parser (String, Expr)
 definition = do
     name <- varName
 
+    varNames <- varName `sepEndBy` spaces
     spaces
     _ <- char '='
     spaces
 
     body <- expr
 
-    pure (name, body)
+    pure (name, foldr Lambda body varNames)
 
 file :: Parser Expr
 file = do
