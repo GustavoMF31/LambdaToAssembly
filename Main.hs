@@ -21,7 +21,6 @@ idTerm = Lambda "x" (Var "x")
 -- TODO: Printing (Or IO in general)
 -- TODO: mul builtIn
 -- TODO: Boolean OR
--- TODO: make the examples typecheck
 -- TODO: Infix binary operators
 -- TODO: Comments
 -- TODO: ADTs

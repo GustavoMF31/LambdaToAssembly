@@ -1,1 +1,6 @@
-(\f -> eq (f 10) (f 11) : (Int -> Int) -> Bool) (add 10)
+boolToInt : Bool -> Int
+boolToInt x = if x
+  then 1
+  else 0
+
+(\f -> add (boolToInt (f 10)) (boolToInt (f 11)) : (Int -> Bool) -> Int) (eq 10)
