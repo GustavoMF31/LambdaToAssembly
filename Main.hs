@@ -2,7 +2,7 @@ import System.Exit (exitFailure)
 import System.Environment (getArgs)
 
 import Parser (parseFromFile)
-import Compile (toDeBruijn, compile, asmToString, checkMain)
+import Compile (toDeBruijn, compile, asmToString, constructorNames, checkMain)
 
 {-
 term, idTerm, cardinal, kestrel, kite :: Expr
@@ -36,19 +36,19 @@ main = do
 
     -- parseFromFile might crash due to the use of readFile
     parsed <- parseFromFile file 
-    expr <- case parsed of
+    (dataDecls, expr) <- case parsed of
         Left e -> exitWithMessage $ "Parse error:\n" ++ show e
         Right x -> pure x
 
-    dbExpr <- case toDeBruijn expr of
+    dbExpr <- case toDeBruijn (constructorNames dataDecls) expr of
       Left var -> exitWithMessage $ "Out of scope variable: " ++ var
       Right dbExpr -> pure dbExpr
 
-    case checkMain dbExpr of
+    case checkMain dataDecls dbExpr of
         Left err -> putStrLn $ "Type Error: " ++ err
         Right () -> pure ()
-        
-    writeFile "out.asm" $ asmToString $ compile dbExpr
+
+    writeFile "out.asm" $ asmToString $ compile dataDecls dbExpr
 
   where
     exitWithMessage msg = putStrLn msg >> exitFailure

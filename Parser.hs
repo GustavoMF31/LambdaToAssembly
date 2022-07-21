@@ -6,16 +6,17 @@ import Text.Parsec hiding (spaces)
 import Text.Parsec.Char (char)
 import Text.Parsec.String (Parser)
 
-import Compile (Expr(..), Type(..))
+import Compile (Expr(..), Type(..), DataDecl(..))
 import Data.Char (isDigit)
 import Data.Maybe (isJust)
 import Control.Monad (guard, void)
+import Data.Either (partitionEithers)
 
 validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
 
 keywords :: [String]
-keywords = ["if", "then", "else", "let", "in", "Int", "Bool", "True", "False"]
+keywords = ["if", "then", "else", "let", "in", "data", "Int", "Bool", "True", "False"]
 
 varName :: Parser String
 varName = do
@@ -102,6 +103,7 @@ parseTypePrefix = do
     parens parseType
     <|> (BoolType <$ string "Bool")
     <|> (IntType  <$ string "Int")
+    <|> (UserDefinedType <$> varName)
     <?> "type"
 
 parseType :: Parser Type
@@ -145,17 +147,35 @@ definition = do
 
     pure (name, foldr Lambda body varNames)
 
-file :: Parser Expr
+dataDecl :: Parser DataDecl
+dataDecl = do
+    _ <- try $ string "data"
+    spaces
+    tyName <- varName
+    spaces
+    _ <- char '='
+    spaces
+    constructorsDecls <- constructor `sepBy` (char '|' >> spaces)
+    pure $ MkDataDecl tyName constructorsDecls
+  where
+    constructor = do
+        conName <- varName
+        spaces
+        inputTypes <- parseType `sepEndBy` spaces
+        pure (conName, inputTypes)
+
+file :: Parser ([DataDecl], Expr)
 file = do
-    definitions <- try definitionWithType `sepEndBy` string "\n\n"
+    decls <- (Left <$> try definitionWithType <|> Right <$> dataDecl) `sepEndBy` string "\n\n"
+    let (defs, dataDecls) = partitionEithers decls
     spaces
     main <- expr
     spaces
-    -- pure $ foldl (\body (ann, (name, def)) -> Let ann name def body) main definitions
-    pure $ foldr (\(ty, (name, def)) ->  Let ty name def) main definitions
+    let programExpr = foldr (\(ty, (name, def)) ->  Let ty name def) main defs
+    pure (dataDecls, programExpr)
 
 -- Unsafe! Uses readFile.
-parseFromFile :: String -> IO (Either ParseError Expr)
+parseFromFile :: String -> IO (Either ParseError ([DataDecl], Expr))
 parseFromFile fileName = do
     fileContent <- readFile fileName
     pure $ parse (file <* eof) fileName fileContent

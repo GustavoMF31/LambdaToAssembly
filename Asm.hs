@@ -126,4 +126,3 @@ asmLineToString EmptyLine = ""
 -- Top level comments don't need indentaion, while regular comments do
 asmLineToString (Comment str) = "    ;" <+> str
 asmLineToString (TopLevelComment str) = ";" <+> str
-

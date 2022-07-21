@@ -1,0 +1,20 @@
+data User
+  = Admin Int
+  | RegularUser Int Int
+  | Gust 
+
+data UserPair = MkUserPair User User
+
+adminJeff : User
+adminJeff = Admin 1
+
+adminJohn : User
+adminJohn = Admin 2
+
+gust : User
+gust = Gust
+
+myPair : UserPair
+myPair = MkUserPair adminJohn gust
+
+eq adminJeff adminJeff
