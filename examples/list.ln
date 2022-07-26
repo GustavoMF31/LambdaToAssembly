@@ -1,0 +1,20 @@
+data ListInt
+  = Nil
+  | Cons Int ListInt
+
+pred : Int -> Int
+pred n = add n -1
+
+countdown : Int -> ListInt
+countdown n = if eq n 0
+  then Cons 0 Nil
+  else Cons n (countdown (pred n))
+
+foldr : (Int -> Int -> Int) -> Int -> ListInt -> Int
+foldr cons nil list = case list of
+  Nil -> nil;
+  Cons x xs -> cons x (fold cons nil xs);
+
+sum = foldr add 0
+
+sum (countdown 4)

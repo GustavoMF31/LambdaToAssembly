@@ -7,7 +7,7 @@ import Text.Parsec.Char (char)
 import Text.Parsec.String (Parser)
 
 import Compile (Expr(..), Type(..), DataDecl(..))
-import Data.Char (isDigit)
+import Data.Char (isDigit, isUpper, isLower)
 import Data.Maybe (isJust)
 import Control.Monad (guard, void)
 import Data.Either (partitionEithers)
@@ -16,13 +16,35 @@ validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
 
 keywords :: [String]
-keywords = ["if", "then", "else", "let", "in", "data", "Int", "Bool", "True", "False"]
+keywords = ["if", "then", "else", "let", "in", "data", "of", "Int", "Bool", "True", "False"]
 
-varName :: Parser String
-varName = do
+-- TODO: We might need "try" here just like in conVarName
+simpleName :: Parser String
+simpleName = do
     name <- many1 $ satisfy validNameChar
     guard $ name `notElem` keywords
     pure name
+
+-- TODO: Same
+varName :: Parser String
+varName = do
+    name <- simpleName
+    guard $ firstLower name
+    pure name
+
+firstUpper :: String -> Bool
+firstUpper [] = True
+firstUpper (x : _) = isUpper x
+
+firstLower :: String -> Bool
+firstLower [] = True
+firstLower (x : _) = isLower x
+
+conVarName :: Parser String
+conVarName = try $ do -- "try" here makes sure it either consumes the whole variable of none of it
+    conName <- simpleName
+    guard $ firstUpper conName
+    pure conName
 
 -- An empty line signals the end of a definition,
 -- so "spaces" must respect it
@@ -86,11 +108,32 @@ exprPrefix = do
     spaces
     body <- expr
     pure $ Let ty name def body
+ <|> do
+    -- Case expression
+    _ <- try $ string "case"
+    spaces
+    scrutinee <- expr
+    spaces
+    _ <- string "of"
+    spaces
+    branches <- caseAlternative `sepEndBy` (spaces >> char ';' >> spaces)
+    pure $ Case scrutinee branches
  <|> try do -- Try is necessary to avoid consuming keywords such as `then` and `else`
-    -- Variables
-    name <- varName
+    -- Variables (which might be constructors)
+    name <- simpleName
     pure $ Var name
  <?> "expression"
+
+caseAlternative :: Parser (String, [String], Expr)
+caseAlternative = do
+    conName <- conVarName
+    spaces
+    vars <- varName `sepEndBy` spaces
+    spaces
+    _ <- string "->"
+    spaces
+    body <- expr
+    pure (conName, vars, body)
 
 expr :: Parser Expr
 expr = foldl1 App <$> endBy1 exprPrefix spaces
@@ -98,12 +141,18 @@ expr = foldl1 App <$> endBy1 exprPrefix spaces
 parens :: Parser a -> Parser a
 parens = between (char '(') (char ')')
 
+exactly :: String -> Parser String
+exactly s = do
+    result <- string s
+    notFollowedBy $ satisfy validNameChar
+    pure result
+
 parseTypePrefix :: Parser Type
 parseTypePrefix = do
     parens parseType
-    <|> (BoolType <$ string "Bool")
-    <|> (IntType  <$ string "Int")
-    <|> (UserDefinedType <$> varName)
+    <|> (BoolType <$ try (exactly "Bool"))
+    <|> (IntType  <$ try (exactly "Int"))
+    <|> (UserDefinedType <$> conVarName)
     <?> "type"
 
 parseType :: Parser Type
@@ -151,7 +200,7 @@ dataDecl :: Parser DataDecl
 dataDecl = do
     _ <- try $ string "data"
     spaces
-    tyName <- varName
+    tyName <- conVarName
     spaces
     _ <- char '='
     spaces
@@ -159,7 +208,7 @@ dataDecl = do
     pure $ MkDataDecl tyName constructorsDecls
   where
     constructor = do
-        conName <- varName
+        conName <- conVarName
         spaces
         inputTypes <- parseType `sepEndBy` spaces
         pure (conName, inputTypes)

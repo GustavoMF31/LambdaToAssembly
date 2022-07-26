@@ -1,7 +1,7 @@
 data User
   = Admin Int
   | RegularUser Int Int
-  | Gust 
+  | Me 
 
 data UserPair = MkUserPair User User
 
@@ -11,10 +11,19 @@ adminJeff = Admin 1
 adminJohn : User
 adminJohn = Admin 2
 
-gust : User
-gust = Gust
+me : User
+me = Me
 
 myPair : UserPair
-myPair = MkUserPair adminJohn gust
+myPair = MkUserPair adminJohn me
 
-eq adminJeff adminJeff
+isMe : User -> Bool
+isMe user = case user of
+  Me -> True;
+  Admin x -> False;
+  RegularUser x y -> False;
+
+boolToInt : Bool -> Int
+boolToInt b = if b then 1 else 0
+
+boolToInt (isMe me)

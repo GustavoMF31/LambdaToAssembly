@@ -23,7 +23,6 @@ idTerm = Lambda "x" (Var "x")
 -- TODO: Boolean OR
 -- TODO: Infix binary operators
 -- TODO: Comments
--- TODO: ADTs
 -- TODO: Polymorphic Types
 -- TODO: Garbage collection
 main :: IO ()
@@ -40,7 +39,7 @@ main = do
         Left e -> exitWithMessage $ "Parse error:\n" ++ show e
         Right x -> pure x
 
-    dbExpr <- case toDeBruijn (constructorNames dataDecls) expr of
+    dbExpr <- case toDeBruijn dataDecls expr of
       Left var -> exitWithMessage $ "Out of scope variable: " ++ var
       Right dbExpr -> pure dbExpr
 

@@ -2,14 +2,17 @@ module Compile (Expr(..), Type(..), DataDecl(..), toDeBruijn, compile, asmToStri
                 checkMain, constructorNames) where
 
 import Numeric.Natural (Natural)
-import Data.Bifunctor (second)
+import Data.Bifunctor (second, Bifunctor (first))
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Control.Monad.State (State, MonadState (get, put), runState)
+import Control.Monad (forM, forM_)
 import Data.Foldable (traverse_)
 import Data.List (genericLength)
 
 import Asm
+import Data.Tuple (swap)
 
+--- Utils ---
 elemIndexNat :: Eq a => a -> [a] -> Maybe Natural
 elemIndexNat _ [] = Nothing
 elemIndexNat a (x : xs) = if a == x
@@ -20,6 +23,17 @@ atIndex :: Natural -> [a] -> Maybe a
 atIndex _ [] = Nothing
 atIndex 0 (x : _) = Just x
 atIndex n (_ : xs) = atIndex (n - 1) xs
+
+note :: a -> Maybe b -> Either a b
+note a Nothing = Left a
+note _ (Just b) = Right b
+
+reassoc :: ((a, b), c) -> (a, (b, c))
+reassoc ((a, b), c) = (a, (b, c))
+
+neSnoc :: [a] -> a -> NonEmpty a
+neSnoc [] x = x :| []
+neSnoc (a : as) x = a :| as ++ [x]
 
 data Type
     = ArrowType Type Type
@@ -39,10 +53,6 @@ data DataDecl = MkDataDecl
     , constructors :: [(String, [Type])] -- Associates constructor names to their arguments
     }
 
--- The compilation context holds the lambdas that have already been generated,
--- as well as how many of them there are
-type CompCtxt = State (Asm, Int)
-
 data Expr
     = Lambda String Expr
     | App Expr Expr
@@ -53,6 +63,7 @@ data Expr
     -- Let optionally holds a type annotation
     -- (Though without one, it can't be recursive and still typecheck) 
     | Let (Maybe Type) String Expr Expr -- Let is allowed to be recursive
+    | Case Expr [(String, [String], Expr)] -- constructor name, constructor variables and body
     | Var String
     | Int Int
     deriving Show
@@ -66,6 +77,11 @@ data DeBruijExpr
     | DBTrue
     | DBFalse
     | DBAnn DeBruijExpr Type
+
+    -- Scrutinee and a list of cases, each holding the constructor tag and input types, as well as the
+    -- case body (part after each arrow)
+    | DBCase DeBruijExpr [(Natural, [Type], DeBruijExpr)]
+
     | DBVar Natural
     | DBInt Int
     | DBBuiltIn BuiltInFunction
@@ -91,8 +107,8 @@ asBuiltInFunction :: String -> Maybe BuiltInFunction
 asBuiltInFunction = flip lookup $ zip builtInNames builtIns
 
 -- In case of Left, returns the name of the unbound variable that caused the problem
-toDeBruijn :: [String] -> Expr -> Either String DeBruijExpr
-toDeBruijn definedConstructors = go []
+toDeBruijn :: [DataDecl] -> Expr -> Either String DeBruijExpr
+toDeBruijn dataDecls = go []
   where
     go :: [String] -> Expr -> Either String DeBruijExpr
     go vars (Lambda varName body) = second DBLambda $ go (varName:vars) body
@@ -105,17 +121,38 @@ toDeBruijn definedConstructors = go []
         DBLet ty <$> go (varName : vars) definition <*> go (varName : vars) body
     -- The call to `elemIndexNat` comes first because the global name might be shadowed
     go vars (Var varName) = case elemIndexNat varName vars of
-        Nothing -> if varName `elem` definedConstructors
+        Nothing -> if isConstructorDefined varName dataDecls
           then Right $ DBConstructor varName
           else case asBuiltInFunction varName of
             Just builtIn -> Right $ DBBuiltIn builtIn
             Nothing -> Left varName -- Unbound variable
         Just i -> Right $ DBVar i
+    go vars (Case scrutinee cases) = do
+        -- Resolve constructors here
+        dbScrutinee <- go vars scrutinee
+
+        dbCases <- forM cases $ \(conName, matchedVars, body) -> do
+            dbBody <- go (reverse matchedVars ++ vars) body
+            (tag, arity) <- note ("Not defined constructor " ++ conName ++ " used in pattern") $
+                resolveConstructor dataDecls conName
+            pure (tag, arity, dbBody)
+
+        pure $ DBCase dbScrutinee dbCases
+
     go _ (Int i) = Right $ DBInt i
     go _ TrueExpr = Right DBTrue
     go _ FalseExpr = Right DBFalse
     go vars (Ann expr ty) = DBAnn <$> go vars expr <*> pure ty
 
+-- Determines tag and arity of a constructor
+resolveConstructor :: [DataDecl] -> String -> Maybe (Natural, [Type])
+resolveConstructor decls conName = fmap swap $
+    lookup conName $ concatMap (map reassoc . flip zip [0 :: Natural ..] . constructors) decls
+
+isConstructorDefined :: String -> [DataDecl] -> Bool
+isConstructorDefined = any . (\cons -> any ((== cons) . fst) . constructors)
+
+-- Convenient functions for generating assembly
 heapRegister :: Operand
 heapRegister = Rcx
 
@@ -128,56 +165,89 @@ writeToHeap = writeToPtr heapRegister
 advanceHeapPtr :: Int -> Instruction
 advanceHeapPtr = Add heapRegister . NumOperand
 
+-- The compilation context holds the lambdas that have already been generated,
+-- as well as how many of them there are
+type CompCtxt = State (Asm, Natural)
+
 createLambda :: Asm -> CompCtxt ()
 createLambda newLambda = do
     (lambdas, lambdaCount) <- get
     put (newLambda ++ lambdas, lambdaCount + 1)
 
-increaseLambdaCount :: State (Asm, Int) ()
+-- TODO: Define a function "freshLambdaId" in terms of increaseLambdaCount and getLambdaCount
+-- and use that instead of always calling increaseLambdaCount after getLambdaCount
+increaseLambdaCount :: CompCtxt ()
 increaseLambdaCount = do
     (lambdas, lambdaCount) <- get
     put (lambdas, lambdaCount + 1)
 
-getLambdaCount :: CompCtxt Int
+getLambdaCount :: CompCtxt Natural
 getLambdaCount = do
     (_, lambdaCount) <- get
     pure lambdaCount
 
-getCompilationResults :: CompCtxt Asm -> (Asm, Asm)
+getCompilationResults :: CompCtxt a -> (Asm, a)
 getCompilationResults state =
-    let (asm, (lambdas, _)) = runState state ([], 0)
-    in (lambdas, asm)
+    let (a, (lambdas, _)) = runState state ([], 0)
+    in (lambdas, a)
 
--- assembleAsm only handles the constructors that are functions (have non-zero arity)
--- TODO: Treat all constructors uniformly by simplifying the handling of constructors and built-ins
+-- Checks if all mentioned "UserDefinedType" are in fact defined
+-- (Returns the name of the unbound type in case on is found)
+isWellFormed :: [String] -> Type -> Either String ()
+isWellFormed types (UserDefinedType name) = if name `elem` types
+    then Right ()
+    else Left name
+isWellFormed tys (ArrowType a b) = isWellFormed tys a >> isWellFormed tys b
+isWellFormed _ BoolType = Right ()
+isWellFormed _ IntType = Right ()
+
 compile :: [DataDecl] -> DeBruijExpr -> Asm
-compile dataDecls main = uncurry (assembleAsm $ constructorFunctionNames dataDecls) $ getCompilationResults $ do
-    traverse_ compileDataDecl dataDecls
-    compileMain main
+compile dataDecls main =
+    let (generatedLambdas, (asm, globalMap)) = getCompilationResults $ do
+        let indexedConstructors = concatMap (zip [0 :: Natural .. ] . constructors) dataDecls
+            resolvedConstructors = map (\(tag, (name, types)) -> (name, tag, genericLength types)) indexedConstructors
+
+        -- The code for compiling constructors and built-in functions looks nearly identical.
+        -- TODO: Unify the handling of constructors and built-in functions
+
+        -- Compile constructors
+        constructorMainDefs <- forM resolvedConstructors $ \(name, tag, arity) -> do
+            let curryingSteps
+                  | arity == 0 = []
+                  | otherwise = map (curryingStep name) [0 .. arity - 1]
+                (def :| subroutines) =  curryingSteps `neSnoc` compileFinalConstructorApp tag arity
+
+            traverse_ (createLambda . uncurry (asCurryingSubroutine name)) (zip [1..] subroutines)
+            pure (name, def)
+
+        -- Compile built-in functions
+        builtInMainDefs <- forM builtIns $ \builtIn -> do
+            let arity = builtInArity builtIn
+                name = builtInName builtIn
+                curryingSteps = map (curryingStep name) [0 .. arity - 1]
+                (def :| subroutines) =  curryingSteps `neSnoc` compileFinalBuiltInApp builtIn
+
+            traverse_ (createLambda . uncurry (asCurryingSubroutine name)) (zip [1..] subroutines)
+            pure (name, def)
+
+        -- Compile main
+        compiledMain <- compileMain main
+
+        pure (compiledMain, builtInMainDefs ++ constructorMainDefs)
+    in assembleAsm globalMap generatedLambdas asm
 
 constructorNames :: [DataDecl] -> [String]
 constructorNames = concatMap $ map fst . constructors
 
--- Returns only the constructors that have non-zero arity
-constructorFunctionNames :: [DataDecl] -> [String]
-constructorFunctionNames = concatMap $ map fst . filter (not . null . snd) . constructors
-
-compileConstructor :: Natural -> String -> Natural -> CompCtxt ()
-compileConstructor constructorIndex name arity =
-    createLambda $ compileCurriedForms name arity
-      ++ subroutine (name ++ "_curried_" ++ show arity) (map Inst
-         [ Mov Rax heapRegister
-         , writeToHeap $ NumOperand $ fromIntegral constructorIndex
-         , advanceHeapPtr 8
-         , Mov R10 $ NumOperand $ fromIntegral arity
-         , Call $ Symbol "copy_env"
-         ])
-
-compileDataDecl :: DataDecl -> CompCtxt ()
-compileDataDecl decl =
-    -- Compile each of the constructors, determining their runtime tags according to their index in the list of constructors
-    traverse_ (\(constIndex, (name, constArgTypes)) -> compileConstructor constIndex name $ genericLength constArgTypes)
-        $ zip [0..] $ constructors decl
+compileFinalConstructorApp :: Natural -> Natural -> Asm
+compileFinalConstructorApp tag arity = map Inst
+    [ Mov Rax heapRegister
+    , writeToHeap $ NumOperand $ fromIntegral tag
+    , advanceHeapPtr 8
+    -- TODO: Create a function to reduce code duplication in every call to "copy_env"
+    , Mov R10 $ NumOperand $ fromIntegral arity
+    , Call $ Symbol "copy_env"
+    ]
 
 -- Use of each register:
 --   rax ; Holds the return value of a compiled expression
@@ -305,6 +375,54 @@ compileMain = go 0
          -- Restore R9
          ++ [ Inst $ Pop R9 ]
 
+    go vars (DBCase scrutinee cases) = do
+        -- Get a fresh id for the labels for this "case"
+        caseId <- getLambdaCount
+        increaseLambdaCount
+        compiledCases <- concat <$> traverse (compileCase caseId) cases
+
+        let tags = map (\(tag, _, _) -> tag) cases
+        compiledScrutinee <- go vars scrutinee
+        pure $ compiledScrutinee
+         -- Check the constructor tag the scrutinee holds and jump to the corresponding case
+         ++ [ Inst $ Mov Rbx $ Dereference Rax ] -- Load the constructor tag
+         ++ concatMap (checkForTag caseId) tags
+         ++ compiledCases
+         ++ [ Label $ "case_" ++ show caseId ++ "_done" ]
+      where
+        checkForTag :: Natural -> Natural -> Asm
+        checkForTag caseId tag = map Inst
+            [ Cmp Rbx $ NumOperand $ fromIntegral tag
+            , Je $ Symbol $ "case_" ++ show caseId ++ "_branch_" ++ show tag
+            ]
+
+        compileCase :: Natural -> (Natural, [Type], DeBruijExpr) -> CompCtxt Asm
+        compileCase caseId (tag, types, body) = do
+            let arity = genericLength types
+            compiledBody <- go (arity + vars) body
+            pure $ [ Label $ "case_" ++ show caseId ++ "_branch_" ++ show tag ]
+              -- Crete the environment with the variables that have been bound
+              -- by pattern matching
+              ++ [ Inst $ Push heapRegister -- Save what will become the env-pointer
+                 , Inst $ Push R9 -- Preserve our own env-ptr
+                 , Inst $ Lea R9 $ AddressSum Rax $ NumOperand 8 -- Get R9 to point to the bound variables
+
+                 , Inst $ Mov R10 $ NumOperand $ fromIntegral arity -- Copy the bound vars to the env we are creating
+                 , Inst $ Call $ Symbol "copy_env"
+                 , Inst $ Pop R9 -- Restore our env-ptr
+                 , Inst $ Mov R10 $ NumOperand $ fromIntegral vars -- Copy its variables to the env we are creating
+                 , Inst $ Call $ Symbol "copy_env"
+                 , Inst $ Pop Rbx -- Get the new env-ptr back from the stack
+                 , Inst $ Push R9 -- Preserve once more our env-ptr
+                 , Inst $ Mov R9 Rbx -- Set R9 to point to the created environment
+                 , EmptyLine
+                 ]
+                 -- Then evaluate the body
+              ++ compiledBody
+              ++ [ Inst $ Pop R9 ] -- Restore our env-ptr
+              -- Jump to the end of the case expression to ensure that only one branch executes
+              ++ [ Inst $ Jmp $ Symbol $ "case_" ++ show caseId ++ "_done" ]
+
     go _ (DBVar index) = pure
         -- Read the variable from the current environment
         -- (The environment pointer is in r9)
@@ -314,20 +432,27 @@ compileMain = go 0
 
     go _ (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
 
-    go _ (DBBuiltIn builtIn)  = pure [ Inst $ Mov Rax $ Symbol $ builtInName builtIn ++ "_curried_0" ]
-    go _ (DBConstructor name) = pure [ Inst $ Mov Rax $ Symbol $ name                ++ "_curried_0" ]
+    go _ (DBBuiltIn builtIn)  = pure [ Inst $ Mov Rax $ Dereference $ Symbol $ builtInName builtIn ]
+    go _ (DBConstructor name) = pure [ Inst $ Mov Rax $ Dereference $ Symbol name ]
     go _ DBTrue = pure [ Inst $ Mov Rax $ NumOperand 1 ]
     go _ DBFalse = pure [ Inst $ Mov Rax $ NumOperand 0 ]
     go v (DBAnn expr _) = go v expr
 
 -- Types of constructors and types of variables in scope
-type Ctxt = ([(String, Type)], [Maybe Type])
+data Ctxt = MkCtxt
+    { constructorMap :: [(String, Type)]
+    , varTypes :: [Maybe Type]
+    , definedTypes :: [String]
+    }
 
 extend :: Ctxt -> Type -> Ctxt
-extend ctxt ty = second (Just ty :) ctxt
+extend ctxt ty = ctxt { varTypes =  Just ty : varTypes ctxt }
+
+extendMany :: Ctxt -> [Type] -> Ctxt
+extendMany ctxt types = ctxt { varTypes = map Just types ++ varTypes ctxt }
 
 extendWithUnknownType :: Ctxt -> Ctxt
-extendWithUnknownType = second (Nothing :)
+extendWithUnknownType ctxt = ctxt { varTypes =  Nothing : varTypes ctxt }
 
 infer :: Ctxt -> DeBruijExpr -> Either String Type
 infer gamma (DBApp f x) = do
@@ -343,9 +468,10 @@ infer gamma (DBIfThenElse condition ifTrue ifFalse) = do
     check gamma ifFalse returnTy
     pure returnTy
 infer gamma (DBAnn expr ty) = do
+    ensureWellFormed (definedTypes gamma) ty
     check gamma expr ty
     pure ty
-infer gamma (DBVar index) = case atIndex index $ snd gamma of
+infer gamma (DBVar index) = case atIndex index $ varTypes gamma of
     (Just (Just ty)) -> pure ty
     (Just Nothing) -> Left "Recursive code without a type annotation"
     Nothing -> Left "Type checking error: Out of context DeBruijnIndex"
@@ -353,7 +479,7 @@ infer _ DBTrue = pure BoolType
 infer _ DBFalse = pure BoolType
 infer _ (DBInt _) = pure IntType
 infer _ (DBBuiltIn builtIn) = pure $ builtInType builtIn
-infer gamma (DBConstructor name) = case lookup name $ fst gamma of
+infer gamma (DBConstructor name) = case lookup name $ constructorMap gamma of
     Just ty -> Right ty
     Nothing -> Left $ "Constructor " ++ name ++ " does not have a defined type"
 infer _ expr = Left $ "Failed to infer type for " ++ show expr
@@ -361,6 +487,9 @@ infer _ expr = Left $ "Failed to infer type for " ++ show expr
 builtInType :: BuiltInFunction -> Type
 builtInType BuiltInAdd = IntType `ArrowType` (IntType `ArrowType` IntType)
 builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
+
+ensureWellFormed :: [String] -> Type -> Either String ()
+ensureWellFormed ctx = first (++ " is not defined") . isWellFormed ctx
 
 check :: Ctxt -> DeBruijExpr -> Type -> Either String ()
 check gamma (DBLambda body) ty
@@ -372,9 +501,19 @@ check gamma (DBLet Nothing def body) ty = do -- If the let doesn't have an annot
     defTy <- infer (extendWithUnknownType gamma) def
     -- Then check the result (the part after "in")
     check (extend gamma defTy) body ty
-check gamma (DBLet (Just ann) def body) ty = do -- If we do have an annotation thing are easier:
-    check (extend gamma ann) def ann -- Check the definition agains the annotated type
+check gamma (DBLet (Just ann) def body) ty = do -- If we do have an annotation things are easier:
+    ensureWellFormed (definedTypes gamma) ann -- Make sure the type annotation is reasonable
+    check (extend gamma ann) def ann -- Check the definition against the annotated type
     check (extend gamma ann) body ty -- Check the body agains the type for the let
+check gamma (DBCase scrutinee cases) ty = do
+    -- We could be smart and infer the type of the scrutinee based on the patterns in each branch,
+    -- but let's keep things simple for now and just infer it
+
+    _ <- infer gamma scrutinee
+    -- TODO: Check that the constructors mentioned in the patterns come from the type of the scrutinee
+
+    forM_ cases $ \(_, types, body) ->
+        check (extendMany gamma $ reverse types) body ty
 
 check gamma expr ty = do
     inferredTy <- infer gamma expr
@@ -386,7 +525,19 @@ check gamma expr ty = do
             ++ prettyType ty
 
 checkMain :: [DataDecl] -> DeBruijExpr -> Either String ()
-checkMain dataDecls expr = check (concatMap constructorTypes dataDecls, []) expr IntType
+checkMain dataDecls expr = do
+    let ctx = MkCtxt
+          { constructorMap = concatMap constructorTypes dataDecls
+          , definedTypes = map typeName dataDecls
+          , varTypes = []
+          }
+
+    -- Ensure all types mentioned data declarations are well-formed)
+    -- (That is, there are no undefined types in them)
+    traverse_ (ensureWellFormed (definedTypes ctx) . snd) (constructorMap ctx)
+
+    -- Check the main expression
+    check ctx expr IntType
 
 constructorTypes :: DataDecl -> [(String, Type)]
 constructorTypes decl = map (second $ typeForConstructor $ typeName decl) $ constructors decl
@@ -397,13 +548,13 @@ typeForConstructor = foldr ArrowType . UserDefinedType
 subroutine :: String -> Asm -> Asm
 subroutine name instructions = Label name : (instructions ++ [Inst Ret])
 
-compileBuiltIn :: BuiltInFunction -> Asm
-compileBuiltIn BuiltInAdd =
+compileFinalBuiltInApp :: BuiltInFunction -> Asm
+compileFinalBuiltInApp BuiltInAdd =
     [ Inst $ Mov Rax $ Dereference R9
     , Inst $ Mov Rbx $ AddressSum R9 $ NumOperand 8
     , Inst $ Add Rax Rbx
     ]
-compileBuiltIn BuiltInEq =
+compileFinalBuiltInApp BuiltInEq =
     [ Inst $ Mov Rax $ Dereference R9
     , Inst $ Mov Rbx $ AddressSum R9 $ NumOperand 8
     , Inst $ Cmp Rax Rbx
@@ -414,38 +565,31 @@ compileBuiltIn BuiltInEq =
     , Inst $ CmoveNE Rax Rbx
     ]
 
--- TODO: Compute the arity as a function of the builtInType
-builtInArity :: BuiltInFunction -> Natural
-builtInArity BuiltInAdd = 2
-builtInArity BuiltInEq = 2
+arityFromType :: Type -> Natural
+arityFromType (ArrowType _ b) = 1 + arityFromType b
+arityFromType _ = 0
 
-createCurryingSubroutine :: String -> Natural -> Asm
-createCurryingSubroutine name n =
-    subroutine (curried ++ "_" ++ show n)
-    [ Inst $ Mov Rax heapRegister                     -- Save the address to return
-    , Inst $ writeToHeap $ Symbol $ curried ++ "_" ++ show (n + 1)       -- Write the code pointer
+builtInArity :: BuiltInFunction -> Natural
+builtInArity = arityFromType . builtInType
+
+curryingStep :: String -> Natural -> Asm
+curryingStep name n =
+    [ Inst $ Mov Rax heapRegister -- Save the address to return
+    , Inst $ writeToHeap $ Symbol $ name ++ "_curried_" ++ show (n + 1) -- Write the code pointer
     , Inst $ advanceHeapPtr 16
     , Inst $ Mov R10 $ NumOperand $ fromIntegral n -- TODO: Perhaps n-1?
-    , Inst $ Call $ Symbol "copy_env"                         -- Make room for both arguments
+    , Inst $ Call $ Symbol "copy_env" -- Make room for the arguments
     ]
-  where
-    curried = name ++ "_curried"
 
-compileCurriedForms :: String -> Natural -> Asm
-compileCurriedForms _ 0 = []
-compileCurriedForms name arity =
-    concatMap (createCurryingSubroutine name) [1 .. arity - 1]
+asCurryingSubroutine :: String -> Natural -> Asm -> Asm
+asCurryingSubroutine name n = subroutine (name ++ "_curried_" ++ show n)
 
-compileCurriedBuiltIn :: BuiltInFunction -> Asm
-compileCurriedBuiltIn builtIn =
-    compileCurriedForms name arity
-    ++ subroutine (name ++ "_curried_" ++ show arity) (compileBuiltIn builtIn)
-  where
-    name = builtInName builtIn
-    arity = builtInArity builtIn
+computeGlobalValue :: String -> Asm -> Asm
+computeGlobalValue symbol body = body ++ map Inst
+    [ Mov (Dereference $ Symbol symbol) Rax ]
 
-assembleAsm :: [String] -> Asm -> Asm -> Asm
-assembleAsm conNames lambdas start =
+assembleAsm :: [(String, Asm)] -> Asm -> Asm -> Asm
+assembleAsm globalValues lambdas start =
     [ TopLevelComment "Header"
     , Global "main"
     , Extern $ pure "printf"
@@ -475,9 +619,6 @@ assembleAsm conNames lambdas start =
        ]
     ++ [ EmptyLine ]
 
-    -- Define the built in functions
-    ++ concatMap compileCurriedBuiltIn builtIns
-
     ++ [ Comment "lambdas" | not (null lambdas) ]
     ++ lambdas
     ++ [ EmptyLine ]
@@ -487,10 +628,10 @@ assembleAsm conNames lambdas start =
        , Inst $ Mov heapRegister $ Symbol "heap_base"
        ]
 
-    ++ [ Comment "Create the closures for the built in functions" ]
-        -- Since they are always the same, there is no need to create them every time the functions get called,
-        -- so let's create them once and point to them when necessary
-    ++ concat [ [ Inst $ Mov (Dereference $ Symbol $ name ++ "_curried_0") $ Symbol $ name ++ "_curried_1"] | name <- predefinedNames ]
+    -- Write the global values (built-ins and constructors) to their respective locations,
+    -- making them available for the program
+    ++ [ Comment "Define global values" ]
+    ++ concatMap (uncurry computeGlobalValue) globalValues
     ++ [ EmptyLine ]
 
     ++ start
@@ -513,14 +654,14 @@ assembleAsm conNames lambdas start =
        ]
 
     -- Allocate space for the closures of constructors and built-in functions
-    ++ concat [ [Label (name ++ "_curried_0"), Inst $ Resb 16] | name <- predefinedNames ]
+    ++ concat [ [Label name, Inst $ Resb 8] | name <- globalNames ]
 
        -- Allocate memory for the heap in the .bss segment
     ++ [ Label "heap_base"
-       , Inst $ Resb $ 100 * 8 -- TODO: More memory (And garbage collection)
+       , Inst $ Resb $ 1000000 * 8 -- TODO: More memory (And garbage collection)
        ]
   where
     -- Names of the functions the compiler "magically" brings into existence:
     -- Constructors, that are defined by data declarations, and built-in functions
-    predefinedNames = conNames ++ builtInNames
+    globalNames = map fst globalValues
 
