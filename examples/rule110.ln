@@ -1,0 +1,66 @@
+data ListBool = Nil | Cons Bool ListBool
+
+nextState : Bool -> Bool -> Bool -> Bool
+nextState a b c = if a
+  then if b
+    then if c
+      then False
+      else True
+    else if c
+      then True
+      else False
+  else if b
+    then if c
+      then True
+      else True
+    else if c
+      then True
+      else False
+
+step : ListBool -> ListBool
+step xs = case xs of
+  Nil -> Nil;
+  Cons x xs -> case xs of
+    Nil -> Cons (nextState x False False) Nil;
+    Cons y xs -> case xs of
+      Nil -> Cons (nextState x y False) (Cons (nextState y False False) Nil);
+      Cons z xs -> Cons (nextState x y z) (step (Cons y (Cons z xs)));
+
+pred : Int -> Int
+pred n = add n -1
+
+repeat : Int -> (ListBool -> ListBool) -> ListBool -> ListBool
+repeat n f x = if eq n 0
+  then x
+  else f (repeat (pred n) f x)
+
+mulFive : Int -> Int
+mulFive x = add x (add x (add x (add x x)))
+
+mulTen : Int -> Int
+mulTen x = add (mulFive x) (mulFive x)
+
+boolToInt : Bool -> Int
+boolToInt b = if b
+  then 1
+  else 0
+
+negate : Bool -> Bool
+negate b = if b then False else True
+
+negateAll : ListBool -> ListBool
+negateAll xs = case xs of
+  Nil -> Nil;
+  Cons x xs -> Cons (negate x) (negateAll xs);
+
+stateToInt : ListBool -> Int
+stateToInt state = case state of
+  Nil -> 0;
+  Cons x xs -> if x
+    then add (boolToInt x) (mulTen (stateToInt xs))
+    else mulTen (stateToInt xs)     ;
+
+start : ListBool
+start = Cons True (Cons False (Cons False Nil))
+
+stateToInt (repeat 5 (\state -> step (Cons False (Cons False state))) start)
