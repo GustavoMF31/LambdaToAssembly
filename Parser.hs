@@ -16,7 +16,7 @@ validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
 
 keywords :: [String]
-keywords = ["if", "then", "else", "let", "in", "data", "of", "Int", "Bool", "True", "False"]
+keywords = ["if", "then", "else", "let", "in", "data", "case", "of", "forall", "Int", "Bool", "True", "False"]
 
 -- TODO: We might need "try" here just like in conVarName
 simpleName :: Parser String
@@ -135,8 +135,21 @@ caseAlternative = do
     body <- expr
     pure (conName, vars, body)
 
+typeApp :: Parser Type
+typeApp = char '@' >> parseTypePrefix
+
+-- TODO: This is really just a fold, isn't it?
+buildApplication :: Expr -> [Either Expr Type] -> Expr
+buildApplication e [] = e
+buildApplication e (Left e' : xs) = buildApplication (App e e') xs
+buildApplication e (Right ty : xs) = buildApplication (TypeApp e ty) xs
+
 expr :: Parser Expr
-expr = foldl1 App <$> endBy1 exprPrefix spaces
+expr = do
+    firstExpr <- exprPrefix
+    optional spaces
+    fragments <- sepEndBy (Left <$> exprPrefix <|> Right <$> typeApp) spaces
+    pure $ buildApplication firstExpr fragments
 
 parens :: Parser a -> Parser a
 parens = between (char '(') (char ')')
@@ -152,7 +165,17 @@ parseTypePrefix = do
     parens parseType
     <|> (BoolType <$ try (exactly "Bool"))
     <|> (IntType  <$ try (exactly "Int"))
+    <|> do -- ForAll
+      _ <- try $ string "forall"
+      spaces
+      var <- varName
+      spaces
+      _ <- char '.'
+      spaces
+      body <- parseType
+      pure $ ForAll var body
     <|> (UserDefinedType <$> conVarName)
+    <|> (TypeVar <$> varName)
     <?> "type"
 
 parseType :: Parser Type

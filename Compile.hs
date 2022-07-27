@@ -40,13 +40,32 @@ data Type
     | BoolType
     | IntType
     | UserDefinedType String
+    | TypeVar String
+    | ForAll String Type
     deriving (Eq, Show)
 
+parens :: Bool -> String -> String
+parens True str = "(" ++ str ++ ")"
+parens False str = str
+
 prettyType :: Type -> String
-prettyType BoolType = "Bool"
-prettyType IntType = "Int"
-prettyType (ArrowType a b) = prettyType a ++ " -> " ++ prettyType b
-prettyType (UserDefinedType name) = name
+prettyType = prettyTypeP False
+
+outermostForAlls :: Type -> ([String], Type)
+outermostForAlls (ForAll name body) = first (name :) (outermostForAlls body)
+outermostForAlls ty = ([], ty)
+
+-- The argument "p" indicates whether the expression needs parenthesis or not
+prettyTypeP :: Bool -> Type -> String
+prettyTypeP _ BoolType = "Bool"
+prettyTypeP _ IntType = "Int"
+prettyTypeP p (ArrowType a b) = parens p $ prettyTypeP True a ++ " -> " ++ prettyTypeP False b
+prettyTypeP _ (UserDefinedType name) = name
+prettyTypeP _ (TypeVar name) = name
+-- TODO: Compress multiple foralls into a single keyword
+prettyTypeP p ty@(ForAll _ _) =
+    let (vars, body) = outermostForAlls ty
+    in parens p $ "forall " ++ unwords vars ++ ". " ++ prettyTypeP False body
 
 data DataDecl = MkDataDecl
     { typeName :: String
@@ -66,13 +85,19 @@ data Expr
     | Case Expr [(String, [String], Expr)] -- constructor name, constructor variables and body
     | Var String
     | Int Int
+    | TypeApp Expr Type
     deriving Show
 
 -- TODO: Fix spelling: DeBruijnExpr
 data DeBruijExpr
     = DBLambda DeBruijExpr
     | DBApp DeBruijExpr DeBruijExpr
-    | DBLet (Maybe Type) DeBruijExpr DeBruijExpr
+
+    -- DBLet holds the name of the defined variable (for error messages),
+    -- an optional annotation (which is required if it is a recursive binding),
+    -- the definition and the body where it's used
+    | DBLet String (Maybe Type) DeBruijExpr DeBruijExpr
+
     | DBIfThenElse DeBruijExpr DeBruijExpr DeBruijExpr
     | DBTrue
     | DBFalse
@@ -86,6 +111,7 @@ data DeBruijExpr
     | DBInt Int
     | DBBuiltIn BuiltInFunction
     | DBConstructor String
+    | DBTypeApp DeBruijExpr Type
     deriving Show
 
 data BuiltInFunction
@@ -118,7 +144,7 @@ toDeBruijn dataDecls = go []
     go vars (Let ty varName definition body) =
         -- Since "let" can be recursive, both the definition and the body
         -- have access to variable it binds
-        DBLet ty <$> go (varName : vars) definition <*> go (varName : vars) body
+        DBLet varName ty <$> go (varName : vars) definition <*> go (varName : vars) body
     -- The call to `elemIndexNat` comes first because the global name might be shadowed
     go vars (Var varName) = case elemIndexNat varName vars of
         Nothing -> if isConstructorDefined varName dataDecls
@@ -138,6 +164,8 @@ toDeBruijn dataDecls = go []
             pure (tag, arity, dbBody)
 
         pure $ DBCase dbScrutinee dbCases
+
+    go vars (TypeApp body ty) = DBTypeApp <$> go vars body  <*> pure ty
 
     go _ (Int i) = Right $ DBInt i
     go _ TrueExpr = Right DBTrue
@@ -194,12 +222,17 @@ getCompilationResults state =
 -- Checks if all mentioned "UserDefinedType" are in fact defined
 -- (Returns the name of the unbound type in case on is found)
 isWellFormed :: [String] -> Type -> Either String ()
-isWellFormed types (UserDefinedType name) = if name `elem` types
-    then Right ()
-    else Left name
+isWellFormed types (UserDefinedType name) = ensureDefined name types
 isWellFormed tys (ArrowType a b) = isWellFormed tys a >> isWellFormed tys b
 isWellFormed _ BoolType = Right ()
 isWellFormed _ IntType = Right ()
+isWellFormed types (TypeVar a) = ensureDefined a types
+isWellFormed types (ForAll name body) = isWellFormed (name : types) body
+
+ensureDefined :: String -> [String] -> Either String ()
+ensureDefined name types = if name `elem` types
+    then Right ()
+    else Left name
 
 compile :: [DataDecl] -> DeBruijExpr -> Asm
 compile dataDecls main =
@@ -350,7 +383,7 @@ compileMain = go 0
          ++ compiledFalseBranch
 
          ++ [ Label doneLabel ]
-    go v (DBLet _ definition body) = do
+    go v (DBLet _ _ definition body) = do
         -- Both the definition and the body have access to one more variable
         -- (namely, the let-bound one)
         compiledDefinition <- go (v + 1) definition
@@ -430,6 +463,9 @@ compileMain = go 0
         , EmptyLine
         ]
 
+    -- Since types are erased, type applications are simply ignored for compilation purposes
+    go v (DBTypeApp e _) = go v e
+
     go _ (DBInt i) = pure [ Inst $ Mov Rax (NumOperand i) ]
 
     go _ (DBBuiltIn builtIn)  = pure [ Inst $ Mov Rax $ Dereference $ Symbol $ builtInName builtIn ]
@@ -459,7 +495,7 @@ infer gamma (DBApp f x) = do
     functionTy <- infer gamma f
     (lhs, rhs) <- case functionTy of
         (ArrowType lhs rhs) -> pure (lhs, rhs)
-        _ -> Left $ "Expected function type for " ++ show f
+        ty -> Left $ "Expected function type for " ++ show f ++ ", but got " ++ prettyType ty
     check gamma x lhs
     pure rhs
 infer gamma (DBIfThenElse condition ifTrue ifFalse) = do
@@ -471,6 +507,13 @@ infer gamma (DBAnn expr ty) = do
     ensureWellFormed (definedTypes gamma) ty
     check gamma expr ty
     pure ty
+infer gamma (DBTypeApp e ty') = do
+    ensureWellFormed (definedTypes gamma) ty'
+    exprTy <- infer gamma e 
+    (name, body) <- case exprTy of
+        ForAll name body -> pure (name, body)
+        _ -> Left $ "Expected polymorphic type for " ++ show e ++ ", but got " ++ prettyType exprTy
+    pure $ substitute name ty' body
 infer gamma (DBVar index) = case atIndex index $ varTypes gamma of
     (Just (Just ty)) -> pure ty
     (Just Nothing) -> Left "Recursive code without a type annotation"
@@ -484,6 +527,7 @@ infer gamma (DBConstructor name) = case lookup name $ constructorMap gamma of
     Nothing -> Left $ "Constructor " ++ name ++ " does not have a defined type"
 infer _ expr = Left $ "Failed to infer type for " ++ show expr
 
+
 builtInType :: BuiltInFunction -> Type
 builtInType BuiltInAdd = IntType `ArrowType` (IntType `ArrowType` IntType)
 builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
@@ -491,19 +535,23 @@ builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
 ensureWellFormed :: [String] -> Type -> Either String ()
 ensureWellFormed ctx = first (++ " is not defined") . isWellFormed ctx
 
+whenChecking :: String -> Either String a -> Either String a
+whenChecking varName = first (("When checking " ++ varName ++ ": ") ++)
+
 check :: Ctxt -> DeBruijExpr -> Type -> Either String ()
+check gamma expr (ForAll name ty) = check (extend gamma $ TypeVar name) expr ty
 check gamma (DBLambda body) ty
     | (ArrowType lhs rhs) <- ty = check (extend gamma lhs) body rhs
     | otherwise = Left $ "Lambda can't have type " ++ prettyType ty
-check gamma (DBLet Nothing def body) ty = do -- If the let doesn't have an annotation
+check gamma (DBLet varName Nothing def body) ty = do -- If the let doesn't have an annotation
     -- Infer a type for the definition hoping it won't make a recursive call
     -- (If it does we are screwed and typechecking fails)
-    defTy <- infer (extendWithUnknownType gamma) def
+    defTy <- whenChecking varName $ infer (extendWithUnknownType gamma) def
     -- Then check the result (the part after "in")
     check (extend gamma defTy) body ty
-check gamma (DBLet (Just ann) def body) ty = do -- If we do have an annotation things are easier:
+check gamma (DBLet varName (Just ann) def body) ty = do -- If we do have an annotation things are easier:
     ensureWellFormed (definedTypes gamma) ann -- Make sure the type annotation is reasonable
-    check (extend gamma ann) def ann -- Check the definition against the annotated type
+    whenChecking varName $ check (extend gamma ann) def ann -- Check the definition against the annotated type
     check (extend gamma ann) body ty -- Check the body agains the type for the let
 check gamma (DBCase scrutinee cases) ty = do
     -- We could be smart and infer the type of the scrutinee based on the patterns in each branch,
@@ -523,6 +571,20 @@ check gamma expr ty = do
             ++ prettyType inferredTy
             ++ " does not match checking type "
             ++ prettyType ty
+
+
+substitute :: String -> Type -> Type -> Type
+substitute var ty (TypeVar name) = if name == var
+    then ty
+    else TypeVar name
+substitute var ty (ArrowType a b) = ArrowType (substitute var ty a) (substitute var ty b)
+-- Make sure the name bound by the forall shadows the substitution
+substitute var ty (ForAll name body) = if var == name
+    then ForAll name body
+    else ForAll name $ substitute var ty body
+substitute _ _ BoolType = BoolType
+substitute _ _ IntType = IntType
+substitute _ _ (UserDefinedType name) = UserDefinedType name
 
 checkMain :: [DataDecl] -> DeBruijExpr -> Either String ()
 checkMain dataDecls expr = do

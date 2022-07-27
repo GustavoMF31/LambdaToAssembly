@@ -1,0 +1,10 @@
+app : forall a. forall b. (a -> b) -> a -> b
+app f x = f x
+
+boolToInt : Bool -> Int
+boolToInt b = if b then 1 else 0
+
+main : Bool
+main = app @Int @Bool (\x -> if eq x 0 then True else False) 0
+
+boolToInt main
