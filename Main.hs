@@ -2,7 +2,7 @@ import System.Exit (exitFailure)
 import System.Environment (getArgs)
 
 import Parser (parseFromFile)
-import Compile (toDeBruijn, compile, asmToString, constructorNames, checkMain)
+import Compile (toDeBruijn, compile, asmToString, checkMain)
 
 {-
 term, idTerm, cardinal, kestrel, kite :: Expr

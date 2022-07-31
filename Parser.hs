@@ -6,7 +6,7 @@ import Text.Parsec hiding (spaces)
 import Text.Parsec.Char (char)
 import Text.Parsec.String (Parser)
 
-import Compile (Expr(..), Type(..), DataDecl(..))
+import Compile (Expr(..), Type(..), DataDecl(..), generalize)
 import Data.Char (isDigit, isUpper, isLower)
 import Data.Maybe (isJust)
 import Control.Monad (guard, void)
@@ -168,12 +168,12 @@ parseTypePrefix = do
     <|> do -- ForAll
       _ <- try $ string "forall"
       spaces
-      var <- varName
+      vars <- sepEndBy varName spaces
       spaces
       _ <- char '.'
       spaces
       body <- parseType
-      pure $ ForAll var body
+      pure $ foldr ForAll body vars
     <|> (UserDefinedType <$> conVarName)
     <|> (TypeVar <$> varName)
     <?> "type"
@@ -204,7 +204,7 @@ definitionWithType = do
     spaces
 
     body <- expr
-    pure (ty, (name, foldr Lambda body varNames))
+    pure (fmap generalize ty, (name, foldr Lambda body varNames))
 
 definition :: Parser (String, Expr)
 definition = do

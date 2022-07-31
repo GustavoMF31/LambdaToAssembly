@@ -1,5 +1,5 @@
 module Compile (Expr(..), Type(..), DataDecl(..), toDeBruijn, compile, asmToString,
-                checkMain, constructorNames) where
+                checkMain, generalize) where
 
 import Numeric.Natural (Natural)
 import Data.Bifunctor (second, Bifunctor (first))
@@ -7,7 +7,7 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Control.Monad.State (State, MonadState (get, put), runState)
 import Control.Monad (forM, forM_)
 import Data.Foldable (traverse_)
-import Data.List (genericLength)
+import Data.List (union, delete, genericLength)
 
 import Asm
 import Data.Tuple (swap)
@@ -43,6 +43,19 @@ data Type
     | TypeVar String
     | ForAll String Type
     deriving (Eq, Show)
+
+freeVars :: Type -> [String]
+freeVars BoolType = []
+freeVars IntType = []
+freeVars (UserDefinedType _) = []
+freeVars (ArrowType a b) = freeVars a `union` freeVars b
+freeVars (TypeVar name) = [name]
+freeVars (ForAll name body) = delete name $ freeVars body
+
+-- Generalizes over unbound type variables
+-- fact: freeVars (generalize ty) == []
+generalize :: Type -> Type
+generalize = foldr ForAll <*> freeVars
 
 parens :: Bool -> String -> String
 parens True str = "(" ++ str ++ ")"
@@ -268,9 +281,6 @@ compile dataDecls main =
 
         pure (compiledMain, builtInMainDefs ++ constructorMainDefs)
     in assembleAsm globalMap generatedLambdas asm
-
-constructorNames :: [DataDecl] -> [String]
-constructorNames = concatMap $ map fst . constructors
 
 compileFinalConstructorApp :: Natural -> Natural -> Asm
 compileFinalConstructorApp tag arity = map Inst

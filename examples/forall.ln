@@ -1,4 +1,4 @@
-app : forall a. forall b. (a -> b) -> a -> b
+app : (a -> b) -> a -> b
 app f x = f x
 
 boolToInt : Bool -> Int
