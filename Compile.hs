@@ -706,6 +706,10 @@ assembleAsm globalValues lambdas start =
     ++ concatMap (uncurry computeGlobalValue) globalValues
     ++ [ EmptyLine ]
 
+    -- Preserve Rbx, which is callee-saved in the C convention
+    -- (This also aligns the stack for the printf call below)
+    ++ [ Inst $ Push Rbx ]
+
     ++ start
     ++ [ Comment "Print the top of the stack" ]
     ++ map Inst
@@ -713,6 +717,7 @@ assembleAsm globalValues lambdas start =
        , Mov Rsi Rax
        , Xor Rax Rax
        , Call (Symbol "printf")
+       , Pop Rbx -- Get Rbx back from the stack
        , Ret -- Exit by returning
        ]
     ++ [ EmptyLine ]
