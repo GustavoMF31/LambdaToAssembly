@@ -13,7 +13,7 @@ countdown n = if eq n 0
 foldr : (Int -> Int -> Int) -> Int -> ListInt -> Int
 foldr cons nil list = case list of
   Nil -> nil;
-  Cons x xs -> cons x (fold cons nil xs);
+  Cons x xs -> cons x (foldr cons nil xs);
 
 sum = foldr add 0
 
