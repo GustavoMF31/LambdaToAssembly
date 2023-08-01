@@ -3,7 +3,6 @@
 module Parser where
 
 import Text.Parsec hiding (spaces)
-import Text.Parsec.Char (char)
 import Text.Parsec.String (Parser)
 
 import Compile (Expr(..), Type(..), DataDecl(..), generalize)
@@ -21,7 +20,9 @@ keywords = ["if", "then", "else", "let", "in", "data", "case", "of", "forall", "
 -- TODO: We might need "try" here just like in conVarName
 simpleName :: Parser String
 simpleName = do
-    name <- many1 $ satisfy validNameChar
+    prefix <- many1 $ satisfy validNameChar
+    suffix <- many $ satisfy (`elem` '\'' : ['0' .. '9'])
+    let name = prefix ++ suffix
     guard $ name `notElem` keywords
     pure name
 
