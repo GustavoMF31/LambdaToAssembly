@@ -1,13 +1,17 @@
+-- TODO: Use Haskell 2021
+{-# LANGUAGE TupleSections #-}
+
 module Compile (Expr(..), Type(..), DataDecl(..), toDeBruijn, compile, asmToString,
                 checkMain, generalize) where
 
 import Numeric.Natural (Natural)
-import Data.Bifunctor (second, Bifunctor (first))
-import Data.List.NonEmpty (NonEmpty ((:|)))
 import Control.Monad.State (State, MonadState (get, put), runState)
 import Control.Monad (forM, forM_)
+import Control.Arrow ((&&&))
 import Data.Foldable (traverse_)
 import Data.List (union, delete, genericLength)
+import Data.Bifunctor (second, Bifunctor (first))
+import Data.List.NonEmpty (NonEmpty ((:|)))
 
 import Asm
 import Data.Tuple (swap)
@@ -35,8 +39,14 @@ neSnoc :: [a] -> a -> NonEmpty a
 neSnoc [] x = x :| []
 neSnoc (a : as) x = a :| as ++ [x]
 
+data Kind
+    = ArrowKind Kind Kind
+    | Type
+    deriving (Eq, Show)
+
 data Type
     = ArrowType Type Type
+    | AppType Type Type
     | BoolType
     | IntType
     | UserDefinedType String
@@ -49,6 +59,7 @@ freeVars BoolType = []
 freeVars IntType = []
 freeVars (UserDefinedType _) = []
 freeVars (ArrowType a b) = freeVars a `union` freeVars b
+freeVars (AppType f x) = freeVars f `union` freeVars x
 freeVars (TypeVar name) = [name]
 freeVars (ForAll name body) = delete name $ freeVars body
 
@@ -69,20 +80,29 @@ outermostForAlls (ForAll name body) = first (name :) (outermostForAlls body)
 outermostForAlls ty = ([], ty)
 
 -- The argument "p" indicates whether the expression needs parenthesis or not
+-- TODO: In the presence of function types and `AppType`s, this function
+-- sometimes places unnecessary parenthesis.
 prettyTypeP :: Bool -> Type -> String
 prettyTypeP _ BoolType = "Bool"
 prettyTypeP _ IntType = "Int"
 prettyTypeP p (ArrowType a b) = parens p $ prettyTypeP True a ++ " -> " ++ prettyTypeP False b
 prettyTypeP _ (UserDefinedType name) = name
 prettyTypeP _ (TypeVar name) = name
--- TODO: Compress multiple foralls into a single keyword
+prettyTypeP p (AppType f x) = parens p $ prettyTypeP (not $ isAppType f) f ++ " " ++ prettyTypeP True x
+  where
+    isAppType :: Type -> Bool
+    isAppType (AppType _ _) = True
+    isAppType _ = False
 prettyTypeP p ty@(ForAll _ _) =
     let (vars, body) = outermostForAlls ty
     in parens p $ "forall " ++ unwords vars ++ ". " ++ prettyTypeP False body
 
+-- Represents a data declaration, for example, "List a = Nil | Cons a (List a)"
 data DataDecl = MkDataDecl
-    { typeName :: String
-    , constructors :: [(String, [Type])] -- Associates constructor names to their arguments
+    { typeName :: String   -- "List"
+    , typeVars :: [String] -- ["a"]
+     -- Associates constructor names to their arguments
+    , constructors :: [(String, [Type])] -- [(Nil, []), (Cons [a, List a])]
     }
 
 data Expr
@@ -116,8 +136,8 @@ data DeBruijExpr
     | DBFalse
     | DBAnn DeBruijExpr Type
 
-    -- Scrutinee and a list of cases, each holding the constructor tag and input types, as well as the
-    -- case body (part after each arrow)
+    -- Holds the scrutinee and a list of cases, each holding the constructor
+    -- tag and input types, as well as the case body (part after each arrow)
     | DBCase DeBruijExpr [(Natural, [Type], DeBruijExpr)]
 
     | DBVar Natural
@@ -232,20 +252,34 @@ getCompilationResults state =
     let (a, (lambdas, _)) = runState state ([], 0)
     in (lambdas, a)
 
--- Checks if all mentioned "UserDefinedType" are in fact defined
--- (Returns the name of the unbound type in case on is found)
-isWellFormed :: [String] -> Type -> Either String ()
-isWellFormed types (UserDefinedType name) = ensureDefined name types
-isWellFormed tys (ArrowType a b) = isWellFormed tys a >> isWellFormed tys b
-isWellFormed _ BoolType = Right ()
-isWellFormed _ IntType = Right ()
-isWellFormed types (TypeVar a) = ensureDefined a types
-isWellFormed types (ForAll name body) = isWellFormed (name : types) body
+inferKind :: [(String, Kind)] -> Type -> Either String Kind
+inferKind ctxt (ArrowType l r) = checkKind ctxt l Type >> checkKind ctxt r Type >> Right Type
+inferKind ctxt (TypeVar a) = case lookup a ctxt of
+    Just kind -> Right kind
+    Nothing -> Left $ "Undefined type variable \"" ++ a ++ "\""
+inferKind ctxt (AppType f x) = do
+    kind <- inferKind ctxt f
+    case kind of
+        ArrowKind l r -> checkKind ctxt x l >> Right r
+        Type -> Left $ "Expected a type constructor, but found a type, when checking " ++ prettyType f
+inferKind ctxt (UserDefinedType name) = case lookup name ctxt of
+    Just kind -> Right kind
+    Nothing -> Left $ "Undefined name \"" ++ name ++ "\""
+inferKind ctxt (ForAll name body) = do
+    -- TODO: Allow for polymorphism over data constructors
+    checkKind ((name, Type) : ctxt) body Type
+    Right Type
+inferKind _ BoolType = Right Type
+inferKind _ IntType  = Right Type
 
-ensureDefined :: String -> [String] -> Either String ()
-ensureDefined name types = if name `elem` types
-    then Right ()
-    else Left name
+checkKind :: [(String, Kind)] -> Type -> Kind -> Either String ()
+checkKind ctxt ty kind = do
+    kind' <- inferKind ctxt ty
+    if kind == kind'
+        then Right ()
+        -- TODO: pretty-printing of kinds
+        else Left $ "Expected kind " ++ show kind ++ " but got kind "
+               ++ show kind' ++ " for " ++ show ty
 
 compile :: [DataDecl] -> DeBruijExpr -> Asm
 compile dataDecls main =
@@ -486,10 +520,19 @@ compileMain = go 0
 
 -- Types of constructors and types of variables in scope
 data Ctxt = MkCtxt
-    { constructorMap :: [(String, Type)]
-    , varTypes :: [Maybe Type]
-    , definedTypes :: [String]
-    }
+    { -- varTypes holds the types of the variables available in the current scope,
+      -- which are identified by De Bruijn indices
+      varTypes :: [Maybe Type]
+      -- constructorMap associates constructors in scope to their types.
+      -- Unlike usual variables, constructors are identified by name.
+    , constructorMap :: [(String, Type)]
+      -- definedTypes associates types in scope, identified by name, to their kinds
+    , definedTypes :: [(String, Kind)]
+      -- typeConsVars associates the names of the defined datatypes to the list of
+      -- type variables they need to be applied to. Those would be 'a' and 'b' in
+      -- 'Tree a b', for example.
+    , typeConsVars :: [(String, [String])]
+    } deriving (Show)
 
 extend :: Ctxt -> Type -> Ctxt
 extend ctxt ty = ctxt { varTypes =  Just ty : varTypes ctxt }
@@ -499,6 +542,9 @@ extendMany ctxt types = ctxt { varTypes = map Just types ++ varTypes ctxt }
 
 extendWithUnknownType :: Ctxt -> Ctxt
 extendWithUnknownType ctxt = ctxt { varTypes =  Nothing : varTypes ctxt }
+
+extendWithType :: String -> Ctxt -> Ctxt
+extendWithType tyName ctxt = ctxt { definedTypes = (tyName, Type) : definedTypes ctxt }
 
 infer :: Ctxt -> DeBruijExpr -> Either String Type
 infer gamma (DBApp f x) = do
@@ -514,11 +560,12 @@ infer gamma (DBIfThenElse condition ifTrue ifFalse) = do
     check gamma ifFalse returnTy
     pure returnTy
 infer gamma (DBAnn expr ty) = do
-    ensureWellFormed (definedTypes gamma) ty
+    checkKind (definedTypes gamma) ty Type
     check gamma expr ty
     pure ty
 infer gamma (DBTypeApp e ty') = do
-    ensureWellFormed (definedTypes gamma) ty'
+    -- As of now, it is assumed that 'forall' only abstracts over variables of kind Type
+    checkKind (definedTypes gamma) ty' Type
     exprTy <- infer gamma e 
     (name, body) <- case exprTy of
         ForAll name body -> pure (name, body)
@@ -537,19 +584,15 @@ infer gamma (DBConstructor name) = case lookup name $ constructorMap gamma of
     Nothing -> Left $ "Constructor " ++ name ++ " does not have a defined type"
 infer _ expr = Left $ "Failed to infer type for " ++ show expr
 
-
 builtInType :: BuiltInFunction -> Type
 builtInType BuiltInAdd = IntType `ArrowType` (IntType `ArrowType` IntType)
 builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
-
-ensureWellFormed :: [String] -> Type -> Either String ()
-ensureWellFormed ctx = first (++ " is not defined") . isWellFormed ctx
 
 whenChecking :: String -> Either String a -> Either String a
 whenChecking varName = first (("When checking " ++ varName ++ ": ") ++)
 
 check :: Ctxt -> DeBruijExpr -> Type -> Either String ()
-check gamma expr (ForAll name ty) = check (extend gamma $ TypeVar name) expr ty
+check gamma expr (ForAll name ty) = check (extendWithType name gamma) expr ty
 check gamma (DBLambda body) ty
     | (ArrowType lhs rhs) <- ty = check (extend gamma lhs) body rhs
     | otherwise = Left $ "Lambda can't have type " ++ prettyType ty
@@ -560,18 +603,38 @@ check gamma (DBLet varName Nothing def body) ty = do -- If the let doesn't have 
     -- Then check the result (the part after "in")
     check (extend gamma defTy) body ty
 check gamma (DBLet varName (Just ann) def body) ty = do -- If we do have an annotation things are easier:
-    ensureWellFormed (definedTypes gamma) ann -- Make sure the type annotation is reasonable
+    whenChecking ("the annotated type for " ++ varName) $
+        checkKind (definedTypes gamma) ann Type -- Make sure the type annotation is reasonable
     whenChecking varName $ check (extend gamma ann) def ann -- Check the definition against the annotated type
-    check (extend gamma ann) body ty -- Check the body agains the type for the let
+    check (extend gamma ann) body ty -- Check the body against the type for the let
 check gamma (DBCase scrutinee cases) ty = do
     -- We could be smart and infer the type of the scrutinee based on the patterns in each branch,
     -- but let's keep things simple for now and just infer it
+    -- (scrTy is an abbreviation for "scrutinee type")
+    scrTy <- infer gamma scrutinee
 
-    _ <- infer gamma scrutinee
+    let tyVarSubs = tyConVariables scrTy
+
+    tyHead <- note ("Bad type for case scrutinee: " ++ prettyType scrTy) $ tyAppHead scrTy
+    vars   <- note ("Undefined data constructor " ++ tyHead) $ lookup tyHead (typeConsVars gamma)
+
+    -- It is important that all variables are substituted, otherwise there might be unbound type variables
+    -- floating around in the types given to the variables created by pattern matching on a generic type
+    if (length vars == length tyVarSubs)
+        then pure ()
+        -- Gettin in this second branch probably means there was a problem with inferring the
+        -- type for the scrutinee, which might be due to a bug in "infer"
+        else Left "Type checking error: type for case scrutinee is not fully applied"
+
+    let instantionMap = zip vars tyVarSubs
+
+        fullySubstitute :: Type -> Type
+        fullySubstitute = flip (foldr (uncurry substitute)) instantionMap
+
     -- TODO: Check that the constructors mentioned in the patterns come from the type of the scrutinee
-
     forM_ cases $ \(_, types, body) ->
-        check (extendMany gamma $ reverse types) body ty
+        -- Type check every case branch, with the new variables in scope
+        check (extendMany gamma $ reverse $ map fullySubstitute types) body ty
 
 check gamma expr ty = do
     inferredTy <- infer gamma expr
@@ -582,12 +645,26 @@ check gamma expr ty = do
             ++ " does not match checking type "
             ++ prettyType ty
 
+-- Determines what type constructor was used for a given type.
+-- Informally, for example, tyAppHead (F Int Bool) = F
+tyAppHead :: Type -> Maybe String
+tyAppHead (AppType f _) = tyAppHead f
+tyAppHead (UserDefinedType name) = Just name
+tyAppHead _ = Nothing
+
+-- Determines to which variables a type constructor is applied to.
+-- Informally, for example, tyConVariables (F Int Bool) = [Int, Bool]
+tyConVariables :: Type -> [Type]
+tyConVariables (AppType f x) = tyConVariables f ++ [x]
+tyConVariables _ = []
+
 
 substitute :: String -> Type -> Type -> Type
 substitute var ty (TypeVar name) = if name == var
     then ty
     else TypeVar name
 substitute var ty (ArrowType a b) = ArrowType (substitute var ty a) (substitute var ty b)
+substitute var ty (AppType f x) = AppType (substitute var ty f) (substitute var ty x)
 -- Make sure the name bound by the forall shadows the substitution
 substitute var ty (ForAll name body) = if var == name
     then ForAll name body
@@ -596,26 +673,54 @@ substitute _ _ BoolType = BoolType
 substitute _ _ IntType = IntType
 substitute _ _ (UserDefinedType name) = UserDefinedType name
 
+allDistinct :: Eq a => [a] -> Bool
+allDistinct [] = True
+allDistinct (x : xs) = all (/= x) xs && allDistinct xs
+
 checkMain :: [DataDecl] -> DeBruijExpr -> Either String ()
 checkMain dataDecls expr = do
     let ctx = MkCtxt
           { constructorMap = concatMap constructorTypes dataDecls
-          , definedTypes = map typeName dataDecls
+          , definedTypes = map (typeName &&& dataDeclKind) dataDecls
+          , typeConsVars = map (typeName &&& typeVars) dataDecls
           , varTypes = []
           }
 
-    -- Ensure all types mentioned data declarations are well-formed)
-    -- (That is, there are no undefined types in them)
-    traverse_ (ensureWellFormed (definedTypes ctx) . snd) (constructorMap ctx)
+    -- Check that data declarations are well-formed:
+    forM_ dataDecls $ \decl -> do
+        -- Ensure that type variables all have distinct names
+        let displayType = "data " ++ typeName decl ++ " " ++ unwords (typeVars decl)
+        if not $ allDistinct $ typeVars decl
+          then whenChecking displayType $ Left "not all type variables have distinct names"
+          else pure ()
+
+        -- Ensure that all types that are arguments to constructors
+        -- are well-formed (that is, have kind type and don't mention undefined types)
+        forM_ (constructors decl) $ \(_, argTypes) -> whenChecking displayType $
+            let typesInCtxt = definedTypes ctx ++ map (, Type) (typeVars decl)
+            in traverse (flip (checkKind typesInCtxt) Type) argTypes
 
     -- Check the main expression
     check ctx expr IntType
 
-constructorTypes :: DataDecl -> [(String, Type)]
-constructorTypes decl = map (second $ typeForConstructor $ typeName decl) $ constructors decl
+dataDeclKind :: DataDecl -> Kind
+dataDeclKind decl = applyN (genericLength $ typeVars decl) (ArrowKind Type) Type
+  where
+    applyN :: Natural -> (a -> a) -> a -> a
+    applyN n _ x | n <= 0 = x
+    applyN n f x = f (applyN (n-1) f x)
 
-typeForConstructor :: String -> [Type] -> Type
-typeForConstructor = foldr ArrowType . UserDefinedType
+constructorTypes :: DataDecl -> [(String, Type)]
+constructorTypes = map . typeForConstructor <*> constructors
+
+typeForConstructor :: DataDecl -> (String, [Type]) -> (String, Type)
+typeForConstructor decl (conName, conArgs) = (conName, foldr ForAll typeWithArrows (typeVars decl))
+  where
+    typeWithArrows :: Type
+    typeWithArrows = foldr ArrowType returnType conArgs
+
+    returnType :: Type
+    returnType = foldl AppType (UserDefinedType $ typeName decl) (map TypeVar $ typeVars decl)
 
 subroutine :: String -> Asm -> Asm
 subroutine name instructions = Label name : (instructions ++ [Inst Ret])

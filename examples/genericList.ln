@@ -1,0 +1,42 @@
+data List a = Nil | Cons a (List a)
+
+append : a -> List a -> List a
+append x xs = case xs of
+  Nil -> Cons @a x (Nil @a);
+  Cons y xs -> Cons @a y (append @a x xs);
+
+reverse : List a -> List a
+reverse xs = case xs of
+  Nil -> Nil @a;
+  Cons x xs -> append @a x (reverse @a xs);
+
+map : (a -> b) -> List a -> List b
+map f xs = case xs of
+  Nil -> Nil @b;
+  Cons x xs -> Cons @b (f x) (map @a @b f xs);
+
+double : Int -> Int
+double x = add x x
+
+times100 : Int -> Int
+times100 x = let x2  = double x   in
+             let x4  = double x2  in
+             let x8  = double x4  in
+             let x16 = double x8  in
+             let x32 = double x16 in
+             let x64 = double x32 in
+             add (add x64 x32) x4
+
+c = Cons @Int
+
+xs = c 1 (c 2 (c 3 (Nil @Int)))
+
+showr : List Int -> Int
+showr xs = case xs of
+  Nil -> 0;
+  Cons x xs -> add (times100 (showr xs)) x;
+
+show : List Int -> Int
+show xs = showr (reverse @Int xs)
+
+show (map @Int @Int double xs)

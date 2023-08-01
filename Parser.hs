@@ -180,7 +180,24 @@ parseTypePrefix = do
     <?> "type"
 
 parseType :: Parser Type
-parseType = chainr1 parseTypePrefix (ArrowType <$ try (spaces >> string "->" >> spaces))
+parseType = chainr1 parseAppType arrowTypeSeparator
+  where
+    {- Note the use of "try" below when defining the parsers that work as
+       separators for chainr1. This is necessary to make sure that, when
+       they fail, they don't consume any input. This way, the parser doesn't
+       commit to parsing another type, and correctly terminates the chain.
+    -}
+
+    arrowTypeSeparator :: Parser (Type -> Type -> Type)
+    arrowTypeSeparator = ArrowType <$ try (spaces >> string "->" >> spaces)
+
+    -- unlike spaces, strictlySpaces does not allow for any newline chars
+    strictlySpaces :: Parser ()
+    strictlySpaces = skipMany $ void (char ' ')
+
+    parseAppType :: Parser Type
+    parseAppType = chainl1 parseTypePrefix $ AppType <$
+        try (strictlySpaces *> notFollowedBy (char '-' <|> newline))
 
 -- TODO: Remove the code duplication between definitionWithType and definition
 definitionWithType :: Parser (Maybe Type, (String, Expr))
@@ -226,15 +243,16 @@ dataDecl = do
     spaces
     tyName <- conVarName
     spaces
+    tyVars <- varName `sepEndBy` spaces
     _ <- char '='
     spaces
     constructorsDecls <- constructor `sepBy` (char '|' >> spaces)
-    pure $ MkDataDecl tyName constructorsDecls
+    pure $ MkDataDecl tyName tyVars constructorsDecls
   where
     constructor = do
         conName <- conVarName
         spaces
-        inputTypes <- parseType `sepEndBy` spaces
+        inputTypes <- parseTypePrefix `sepEndBy` spaces
         pure (conName, inputTypes)
 
 file :: Parser ([DataDecl], Expr)
