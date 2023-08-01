@@ -1,5 +1,6 @@
 *.hi
 *.o
+*.swp
 Main
 a.out
 out.asm
