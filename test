@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# TODO: Get better at bash scripting, and perhaps avoid "cd"-ing in and out of
+# the directory for each file
+cd examples
+
+for file in *.ln
+do
+  cd ..
+  echo $file:
+  ./build "${file%.ln}"
+  cd examples
+done
+
+cd ..
