@@ -2,14 +2,14 @@
 
 module Parser where
 
+import Control.Monad (guard, void)
+import Data.Char (isDigit, isUpper, isLower)
+import Data.Maybe (isJust)
+
 import Text.Parsec hiding (spaces)
 import Text.Parsec.String (Parser)
 
-import Compile (Expr(..), Type(..), DataDecl(..), generalize)
-import Data.Char (isDigit, isUpper, isLower)
-import Data.Maybe (isJust)
-import Control.Monad (guard, void)
-import Data.Either (partitionEithers)
+import Compile (Expr(..), Type(..), DataDecl(..), Declaration(..), generalize)
 
 validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
@@ -255,18 +255,22 @@ dataDecl = do
         inputTypes <- parseTypePrefix `sepEndBy` spaces
         pure (conName, inputTypes)
 
-file :: Parser ([DataDecl], Expr)
-file = do
-    decls <- (Left <$> try definitionWithType <|> Right <$> dataDecl) `sepEndBy` string "\n\n"
-    let (defs, dataDecls) = partitionEithers decls
-    spaces
-    main <- expr
-    spaces
-    let programExpr = foldr (\(ty, (name, def)) ->  Let ty name def) main defs
-    pure (dataDecls, programExpr)
+declaration :: Parser Declaration
+declaration = DataDeclDef <$> dataDecl <|> regularDef
+  where
+    regularDef :: Parser Declaration
+    regularDef = do
+        -- TODO: Review the use of try here, which is likely what's causing
+        -- the bad parsing error messages
+        (ty, (name, rhs)) <- try definitionWithType
+        pure $ RegularDef name ty rhs
+
+-- TODO: Be more flexible with regards to the presence of many newlines
+file :: Parser [Declaration]
+file = spaces *> declaration `sepEndBy` (try $ spaces >> string "\n\n" >> spaces) <* spaces
 
 -- Unsafe! Uses readFile.
-parseFromFile :: String -> IO (Either ParseError ([DataDecl], Expr))
+parseFromFile :: String -> IO (Either ParseError [Declaration])
 parseFromFile fileName = do
     fileContent <- readFile fileName
     pure $ parse (file <* eof) fileName fileContent

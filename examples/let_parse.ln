@@ -1,1 +1,1 @@
-(\le -> le 5 : (Int -> Int) -> Int) (add 2)
+main = (\le -> le 5 : (Int -> Int) -> Int) (add 2)

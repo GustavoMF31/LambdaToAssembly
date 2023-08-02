@@ -1,4 +1,4 @@
 boolToInt : Bool -> Int
 boolToInt x = if x then 1 else 0
 
-boolToInt (eq 10 10)
+main = boolToInt (eq 10 10)

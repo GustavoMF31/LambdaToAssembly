@@ -1,3 +1,4 @@
-let f : Int -> Int
-    f = (\x -> f x)
-in f 0
+main =
+  let f : Int -> Int
+      f = (\x -> f x)
+  in f 0

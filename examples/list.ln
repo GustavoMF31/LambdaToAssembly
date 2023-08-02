@@ -17,4 +17,4 @@ foldr cons nil list = case list of
 
 sum = foldr add 0
 
-sum (countdown 4)
+main = sum (countdown 4)

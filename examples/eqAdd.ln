@@ -3,4 +3,4 @@ boolToInt x = if x
   then 1
   else 0
 
-(\f -> add (boolToInt (f 10)) (boolToInt (f 11)) : (Int -> Bool) -> Int) (eq 10)
+main = (\f -> add (boolToInt (f 10)) (boolToInt (f 11)) : (Int -> Bool) -> Int) (eq 10)

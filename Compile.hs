@@ -1,8 +1,8 @@
 -- TODO: Use Haskell 2021
 {-# LANGUAGE TupleSections #-}
 
-module Compile (Expr(..), Type(..), DataDecl(..), toDeBruijn, compile, asmToString,
-                checkMain, generalize) where
+module Compile (Expr(..), Type(..), DataDecl(..), Declaration(..), toDeBruijn,
+                compile, asmToString, checkMain, generalize, declsToProgram) where
 
 import Numeric.Natural (Natural)
 import Control.Monad.State (State, MonadState (get, put), runState)
@@ -10,6 +10,7 @@ import Control.Monad (forM, forM_)
 import Control.Arrow ((&&&))
 import Data.Foldable (traverse_)
 import Data.List (union, delete, genericLength)
+import Data.Either (partitionEithers)
 import Data.Bifunctor (second, Bifunctor (first))
 import Data.List.NonEmpty (NonEmpty ((:|)))
 
@@ -53,6 +54,40 @@ data Type
     | TypeVar String
     | ForAll String Type
     deriving (Eq, Show)
+
+data Declaration = DataDeclDef DataDecl | RegularDef String (Maybe Type) Expr
+
+separateDefs :: [Declaration] -> ([DataDecl], [(String, Maybe Type, Expr)])
+separateDefs = partitionEithers . map defAsEither
+  where
+    defAsEither :: Declaration -> Either DataDecl (String, Maybe Type, Expr)
+    defAsEither (DataDeclDef decl) = Left decl
+    defAsEither (RegularDef name ty expr) = Right (name, ty, expr)
+
+declsToProgram :: [Declaration] -> Either String ([DataDecl], Expr)
+declsToProgram decls = do
+    let (dataDecls, exprs) = separateDefs decls
+        namedMain (name, _, _) = name == "main"
+
+    (_, mainTy, mainExpr) <- case filter namedMain exprs of
+        [] -> Left "No main definition found"
+        [def] -> pure def
+        _ -> Left "Multiple main definitions found"
+
+    -- Ensure the main expression has the right type
+    case mainTy of
+        Just ty -> if ty == IntType
+            then pure ()
+            else Left $ "Expected main to have type Int, but found type " ++ prettyType ty
+        Nothing -> pure ()
+
+    let otherExprs = filter (not . namedMain) exprs
+        -- Note that, since we nest the let definitions here,
+        -- mutual recursion is forbidden as of now.
+        -- TODO: Allow definitions to refer to each other mutually recursively
+        programExpr = foldr (\(name, ty, def) -> Let ty name def) mainExpr otherExprs
+
+    pure $ (dataDecls, programExpr)
 
 freeVars :: Type -> [String]
 freeVars BoolType = []

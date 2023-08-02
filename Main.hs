@@ -2,7 +2,7 @@ import System.Exit (exitFailure)
 import System.Environment (getArgs)
 
 import Parser (parseFromFile)
-import Compile (toDeBruijn, compile, asmToString, checkMain)
+import Compile (toDeBruijn, declsToProgram, compile, asmToString, checkMain)
 
 -- TODO: Strings
 -- TODO: Printing (Or IO in general)
@@ -10,7 +10,6 @@ import Compile (toDeBruijn, compile, asmToString, checkMain)
 -- TODO: Boolean OR
 -- TODO: Infix binary operators
 -- TODO: Comments
--- TODO: Polymorphic Types
 -- TODO: Garbage collection
 main :: IO ()
 main = do
@@ -22,11 +21,15 @@ main = do
 
     -- parseFromFile might crash due to the use of readFile
     parsed <- parseFromFile file 
-    (dataDecls, expr) <- case parsed of
+    defs <- case parsed of
         Left e -> exitWithMessage $ "Parse error:\n" ++ show e
         Right x -> pure x
 
-    dbExpr <- case toDeBruijn dataDecls expr of
+    (dataDecls, programExpr) <- case declsToProgram defs of
+        Left e -> exitWithMessage e
+        Right x -> pure x
+
+    dbExpr <- case toDeBruijn dataDecls programExpr of
       Left var -> exitWithMessage $ "Out of scope variable: " ++ var
       Right dbExpr -> pure dbExpr
 

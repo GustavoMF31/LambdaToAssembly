@@ -39,4 +39,4 @@ showr xs = case xs of
 show : List Int -> Int
 show xs = showr (reverse @Int xs)
 
-show (map @Int @Int double xs)
+main = show (map @Int @Int double xs)
