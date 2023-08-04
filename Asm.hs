@@ -37,7 +37,7 @@ data Instruction
 data Operand
     = Symbol String
     | LocalSymbol String
-    | Rax | Rbx | Rcx | Rdx | Rsp | Rdi | Rsi | R9 | R10
+    | Rax | Rbx | Rcx | Rdx | Rsp | Rdi | Rsi | R9 | R10 | R12
     | AddressSum Operand Operand
     | AddressSumMult Operand Operand Operand
     | AddressSumSumMult Operand Operand Operand Operand
@@ -110,6 +110,7 @@ operandToString Rsi = "rsi"
 operandToString Rdi = "rdi"
 operandToString R9 = "r9"
 operandToString R10 = "r10"
+operandToString R12 = "r12"
 
 asmToString :: Asm -> String
 asmToString = concatMap $ (++ "\n") . asmLineToString

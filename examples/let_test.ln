@@ -4,4 +4,4 @@ main =
         then 0
         else let val = f (add x (-1))
              in f (add x (-1))
-  in f 5
+  in printInt (f 5)

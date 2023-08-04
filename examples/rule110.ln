@@ -63,4 +63,6 @@ stateToInt state = case state of
 start : ListBool
 start = Cons True (Cons False (Cons False Nil))
 
-main = stateToInt (repeat 5 (\state -> step (Cons False (Cons False state))) start)
+finalState = repeat 5 (\state -> step (Cons False (Cons False state))) start
+
+main = printInt (stateToInt finalState)

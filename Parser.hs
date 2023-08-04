@@ -163,7 +163,9 @@ exactly s = do
 
 parseTypePrefix :: Parser Type
 parseTypePrefix = do
-    parens parseType
+    UnitType <$ try (exactly "()")
+    <|> IOType <$ try (exactly "IO")
+    <|> parens parseType
     <|> (BoolType <$ try (exactly "Bool"))
     <|> (IntType  <$ try (exactly "Int"))
     <|> do -- ForAll

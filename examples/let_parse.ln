@@ -1,1 +1,1 @@
-main = (\le -> le 5 : (Int -> Int) -> Int) (add 2)
+main = printInt ((\le -> le 5 : (Int -> Int) -> Int) (add 2))

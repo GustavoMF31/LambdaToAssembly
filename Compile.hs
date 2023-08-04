@@ -50,7 +50,13 @@ data Type
     | AppType Type Type
     | BoolType
     | IntType
+    | UnitType
     | UserDefinedType String
+
+    -- An element of type IO a is represented at runtime as:
+    -- [ continuation_ptr | current_action_ptr | current_action_args[0] | .. ]
+    | IOType
+
     | TypeVar String
     | ForAll String Type
     deriving (Eq, Show)
@@ -64,6 +70,9 @@ separateDefs = partitionEithers . map defAsEither
     defAsEither (DataDeclDef decl) = Left decl
     defAsEither (RegularDef name ty expr) = Right (name, ty, expr)
 
+ioUnit :: Type
+ioUnit = AppType IOType UnitType
+
 declsToProgram :: [Declaration] -> Either String ([DataDecl], Expr)
 declsToProgram decls = do
     let (dataDecls, exprs) = separateDefs decls
@@ -76,9 +85,9 @@ declsToProgram decls = do
 
     -- Ensure the main expression has the right type
     case mainTy of
-        Just ty -> if ty == IntType
+        Just ty -> if ty == ioUnit
             then pure ()
-            else Left $ "Expected main to have type Int, but found type " ++ prettyType ty
+            else Left $ "Expected main to have type " ++ prettyType ioUnit ++ ", but found type " ++ prettyType ty
         Nothing -> pure ()
 
     let otherExprs = filter (not . namedMain) exprs
@@ -91,7 +100,9 @@ declsToProgram decls = do
 
 freeVars :: Type -> [String]
 freeVars BoolType = []
+freeVars UnitType = []
 freeVars IntType = []
+freeVars IOType = []
 freeVars (UserDefinedType _) = []
 freeVars (ArrowType a b) = freeVars a `union` freeVars b
 freeVars (AppType f x) = freeVars f `union` freeVars x
@@ -120,6 +131,8 @@ outermostForAlls ty = ([], ty)
 prettyTypeP :: Bool -> Type -> String
 prettyTypeP _ BoolType = "Bool"
 prettyTypeP _ IntType = "Int"
+prettyTypeP _ UnitType = "()"
+prettyTypeP _ IOType = "IO"
 prettyTypeP p (ArrowType a b) = parens p $ prettyTypeP True a ++ " -> " ++ prettyTypeP False b
 prettyTypeP _ (UserDefinedType name) = name
 prettyTypeP _ (TypeVar name) = name
@@ -185,11 +198,17 @@ data DeBruijExpr
 data BuiltInFunction
     = BuiltInAdd
     | BuiltInEq
+    | PrintInt
+    | Pure
+    | Bind
     deriving (Show, Enum, Bounded)
 
 builtInName :: BuiltInFunction -> String
 builtInName BuiltInAdd = "add"
 builtInName BuiltInEq  = "eq"
+builtInName PrintInt  = "printInt"
+builtInName Pure  = "pure"
+builtInName Bind  = "bind"
 
 builtIns :: [BuiltInFunction]
 builtIns = [minBound .. maxBound]
@@ -304,8 +323,10 @@ inferKind ctxt (ForAll name body) = do
     -- TODO: Allow for polymorphism over data constructors
     checkKind ((name, Type) : ctxt) body Type
     Right Type
+inferKind _ IOType = Right $ ArrowKind Type Type
 inferKind _ BoolType = Right Type
 inferKind _ IntType  = Right Type
+inferKind _ UnitType = Right Type
 
 checkKind :: [(String, Kind)] -> Type -> Kind -> Either String ()
 checkKind ctxt ty kind = do
@@ -368,6 +389,7 @@ compileFinalConstructorApp tag arity = map Inst
 --   rdx ; Points at a closure or works as a counter in `copy_env`
 --   r10 ; Holds the argument to `copy_env`
 --   r9  ; Holds the current environment pointer
+--   r8  ; Holds the the pointer to the next io action to execute in the io loop
 compileMain :: DeBruijExpr -> CompCtxt Asm
 compileMain = go 0
   where
@@ -399,10 +421,10 @@ compileMain = go 0
             , Call (Symbol "copy_env")
             ] ++ [ EmptyLine ]
 
-    go v (DBApp f x) = code <$> go v x <*> go v f
+    go v (DBApp f x) = compileApp <$> go v x <*> go v f
       where
-        code :: Asm -> Asm -> Asm
-        code compiledArg compiledFunction = [ Comment "Compiling function for call {" ]
+        compileApp :: Asm -> Asm -> Asm
+        compileApp compiledArg compiledFunction = [ Comment "Compiling function for call {" ]
          ++ compiledFunction
          ++ [ Comment "} Saving closure pointer {" ]
          ++ [ Inst $ Push Rax ] -- Save the closure pointer on the stack
@@ -622,6 +644,9 @@ infer _ expr = Left $ "Failed to infer type for " ++ show expr
 builtInType :: BuiltInFunction -> Type
 builtInType BuiltInAdd = IntType `ArrowType` (IntType `ArrowType` IntType)
 builtInType BuiltInEq  = IntType `ArrowType` (IntType `ArrowType` BoolType)
+builtInType PrintInt   = IntType `ArrowType` ioUnit
+builtInType Pure       = IntType `ArrowType` ioUnit
+builtInType Bind       = ForAll "a" $ TypeVar "a" `ArrowType` (IOType `AppType` TypeVar "a")
 
 whenChecking :: String -> Either String a -> Either String a
 whenChecking varName = first (("When checking " ++ varName ++ ": ") ++)
@@ -706,6 +731,8 @@ substitute var ty (ForAll name body) = if var == name
     else ForAll name $ substitute var ty body
 substitute _ _ BoolType = BoolType
 substitute _ _ IntType = IntType
+substitute _ _ UnitType = UnitType
+substitute _ _ IOType = IOType
 substitute _ _ (UserDefinedType name) = UserDefinedType name
 
 allDistinct :: Eq a => [a] -> Bool
@@ -736,7 +763,7 @@ checkMain dataDecls expr = do
             in traverse (flip (checkKind typesInCtxt) Type) argTypes
 
     -- Check the main expression
-    check ctx expr IntType
+    check ctx expr ioUnit
 
 dataDeclKind :: DataDecl -> Kind
 dataDeclKind decl = applyN (genericLength $ typeVars decl) (ArrowKind Type) Type
@@ -777,8 +804,35 @@ compileFinalBuiltInApp BuiltInEq =
     , Inst $ CmoveNE Rax Rbx
     ]
 
+-- Create and return an IO struct with a pointer to the print_int subroutine
+compileFinalBuiltInApp PrintInt = map Inst
+    -- Save the pointer to the object we are creating
+    [ Mov Rax heapRegister
+    -- Print has no continuation, so we write a nullptr here
+    , writeToHeap $ NumOperand 0
+    , advanceHeapPtr 8
+    -- Write the pointer to the current action
+    , writeToHeap $ Symbol "print_int"
+    , advanceHeapPtr 8
+    -- And include the integer to be printed
+    , Mov Rbx $ Dereference R9
+    , writeToHeap Rbx
+    , advanceHeapPtr 8
+    -- (Rax already contains the pointer we are returning,
+    -- so the work is over)
+    ]
+
+-- TODO: Given an IO struct pointed to by the value in Rax, we should
+-- create a new one that does the original action, but has a new,
+-- extended continuation
+compileFinalBuiltInApp Bind = []
+
+-- TODO: Implement pure
+compileFinalBuiltInApp Pure = []
+
 arityFromType :: Type -> Natural
 arityFromType (ArrowType _ b) = 1 + arityFromType b
+arityFromType (ForAll _ body) = arityFromType body
 arityFromType _ = 0
 
 builtInArity :: BuiltInFunction -> Natural
@@ -829,6 +883,18 @@ assembleAsm globalValues lambdas start =
        , Inst $ Jmp $ LocalSymbol "loop"
        , LocalLabel "done"
        ]
+    ++ subroutine "print_int" -- Assumes R9 is pointing to the Int that is to be printed
+       (map Inst
+       [ Mov Rdi $ Symbol "digit_formatter"
+       , Mov Rsi $ Dereference R9
+       , Sub Rsp $ NumOperand 8
+       , Xor Rax Rax
+       , Call (Symbol "printf")
+        -- We don't have to worry about returning a value, because possible continuations
+        -- to IO () have to take unit as input, which, in practice, means the input value
+        -- will be ignored
+       , Add Rsp $ NumOperand 8
+       ])
     ++ [ EmptyLine ]
 
     ++ [ Comment "lambdas" | not (null lambdas) ]
@@ -846,21 +912,22 @@ assembleAsm globalValues lambdas start =
     ++ concatMap (uncurry computeGlobalValue) globalValues
     ++ [ EmptyLine ]
 
+    -- TODO: Think carefully about register preservation, like the one below.
     -- Preserve Rbx, which is callee-saved in the C convention
-    -- (This also aligns the stack for the printf call below)
+    -- (This also aligns the stack for printf calls)
     ++ [ Inst $ Push Rbx ]
 
+    -- Runs the actual program
     ++ start
-    ++ [ Comment "Print the top of the stack" ]
-    ++ map Inst
-       [ Mov Rdi $ Symbol "digit_formatter"
-       , Mov Rsi Rax
-       , Xor Rax Rax
-       , Call (Symbol "printf")
-       , Pop Rbx -- Get Rbx back from the stack
-       , Ret -- Exit by returning
-       ]
+    ++ ioLoop
+
+    -- Recover Rbx
+    ++ [ Inst $ Pop Rbx ]
     ++ [ EmptyLine ]
+
+    -- Exit the program by returning
+    ++ [ Inst Ret ]
+
     ++ [ TopLevelComment "Put the string for printf in the data segment" ]
     ++ [ Section "data"
        , Label "digit_formatter"
@@ -882,3 +949,33 @@ assembleAsm globalValues lambdas start =
     -- Constructors, that are defined by data declarations, and built-in functions
     globalNames = map fst globalValues
 
+ioLoop :: Asm
+ioLoop =
+    -- Continually processes IO actions untill there is no continuation,
+    -- and then program halts.
+    -- Assumes the result of evaluating the main IO action is in Rax
+    [ Label "io_loop"
+    -- Save the pointer to the IO action struct
+    -- (Note that R12 is caller-saved in the C convention, so the
+    -- action we execute may call C functions and R12 is still
+    -- preserved)
+    , Inst $ Mov R12 Rax
+    -- Pass the environment pointer to the action through R9
+    , Inst $ Lea R9 $ AddressSum Rax $ NumOperand 16
+    -- Call the impure action (which leaves its result in Rax)
+    , Inst $ Call $ AddressSum Rax $ NumOperand 8
+    -- Now we have to call the continuation, passing the result:
+    -- First we get the thunk-pointer
+    , Inst $ Mov R12 $ Dereference R12
+    -- If it is zero, that means that there is no continuation and we are done
+    , Inst $ Cmp R12 $ NumOperand 0
+    , Inst $ Je $ Symbol "done"
+    -- Otherwise, we write the argument to the thunk's environment
+    -- (TODO: Maybe it's necessary to preserve whatever was already there? Idk)
+    , Inst $ Mov (AddressSum R12 $ NumOperand 8) Rax
+    -- And finally, we get the code-pointer and call it
+    , Inst $ Call $ Dereference R12
+    -- Now it's the new IO action that is stored in Rax, and we may loop
+    , Inst $ Jmp $ Symbol "io_loop"
+    , Label "done"
+    ]

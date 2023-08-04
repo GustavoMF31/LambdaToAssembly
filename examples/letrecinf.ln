@@ -1,4 +1,4 @@
 main =
   let f : Int -> Int
       f = (\x -> f x)
-  in f 0
+  in printInt (f 0)

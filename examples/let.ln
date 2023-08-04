@@ -1,1 +1,1 @@
-main = let x = True in if x then 10 else 20
+main = printInt (let x = True in if x then 10 else 20)

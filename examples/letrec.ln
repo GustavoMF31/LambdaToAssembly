@@ -19,4 +19,4 @@ fib = \x -> if eq x 0
       (fib (add x (-1)))
       (fib (add x (-2)))
 
-main = fib x
+main = printInt (fib x)

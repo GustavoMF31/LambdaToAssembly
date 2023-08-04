@@ -1,1 +1,1 @@
-main = add 15 16
+main = printInt (add 15 16)

@@ -17,4 +17,4 @@ fact =
         else go (dec x) (mul x acc)
   in flip go 1
 
-main = fact 5
+main = printInt (fact 5)

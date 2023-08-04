@@ -26,4 +26,4 @@ isMe user = case user of
 boolToInt : Bool -> Int
 boolToInt b = if b then 1 else 0
 
-main = boolToInt (isMe me)
+main = printInt (boolToInt (isMe me))

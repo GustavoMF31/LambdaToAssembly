@@ -1,1 +1,1 @@
-main = (\x y -> 5 : Int -> Int -> Int) 1 2
+main = printInt ((\x y -> 5 : Int -> Int -> Int) 1 2)
