@@ -1,8 +1,10 @@
 import System.Exit (exitFailure)
 import System.Environment (getArgs)
 
-import Parser (parseFromFile)
-import Compile (toDeBruijn, declsToProgram, compile, asmToString, checkMain)
+import Parser    (parseFromFile)
+import TypeCheck (toDeBruijn, declsToProgram, checkMain)
+import Compile   (compile)
+import Asm       (asmToString)
 
 -- TODO: Strings
 -- TODO: Printing (Or IO in general)

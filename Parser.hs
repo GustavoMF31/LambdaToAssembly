@@ -9,7 +9,7 @@ import Data.Maybe (isJust)
 import Text.Parsec hiding (spaces)
 import Text.Parsec.String (Parser)
 
-import Compile (Expr(..), Type(..), DataDecl(..), Declaration(..), generalize)
+import TypeCheck (Expr(..), Type(..), DataDecl(..), Declaration(..), generalize)
 
 validNameChar :: Char -> Bool
 validNameChar = flip elem $ ['a' .. 'z'] ++ ['A' .. 'Z']
